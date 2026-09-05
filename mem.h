@@ -16,6 +16,7 @@
 // Backwards-compatible alias: the flat-load harness uses this as the RAM bound.
 #define MEM_MAX_SIZE RAM_SIZE
 extern uint8_t system_ram[MEM_MAX_SIZE];
+extern uint8_t bios_rom[BIOS_SIZE];
 
 // 1. Fetch a 32-bit Word (Little-Endian)
 // Combines 4 bytes: address A is the lowest byte, A+3 is the highest byte.

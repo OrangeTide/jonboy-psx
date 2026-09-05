@@ -7,9 +7,16 @@
 #include <SDL3/SDL_main.h>
 
 #include "cpu.h"
+#include "inject.h"
 #include "mem.h"
+#include "psio.h"
 #include "vram.h"
 #include "rom.h"
+
+// Boot options shared with the SDL run function (which SDL_RunApp calls with a
+// fixed signature, so they cannot be passed as arguments).
+static int g_psio_boot = 0;         // inject the PSIO boot stub over the BIOS
+static const char *g_psio_sd = NULL; // optional SD-card image to mount
 
 #define TARGET_FPS 15
 #define CYCLES_PER_FRAME 1000 // TODO: this low value is for debug purposes
@@ -104,6 +111,17 @@ jonboy_runapp(int argc, char *argv[])
         printf("BIOS loaded.\n");
     } else {
         printf("No BIOS loaded, continuing with blank ROM.\n");
+    }
+
+    // Optionally mount a virtual SD card and patch the BIOS entry so the CPU
+    // boots into the PSIO firmware instead of the real BIOS.
+    if (g_psio_sd) {
+        load_virtual_sd_card(g_psio_sd);
+    }
+
+    if (g_psio_boot) {
+        inject_boot_stub(bios_rom);
+        printf("PSIO boot stub injected.\n");
     }
 
     // Start execution at the CPU reset vector (BIOS entry point).
@@ -370,6 +388,42 @@ run_exe(const char *path, uint64_t max_steps, const char *vram_out)
     return 2;
 }
 
+// Headless boot: load the BIOS (if present), optionally patch it with the PSIO
+// stub, reset to the boot vector, run, and dump registers. Lets the boot path
+// be exercised and inspected without a window.
+static int
+run_boot(int psio, const char *sd, uint64_t max_steps)
+{
+    if (mem_load_bios("bios.bin") == 0) {
+        printf("BIOS loaded.\n");
+    } else {
+        printf("No BIOS loaded, continuing with blank ROM.\n");
+    }
+
+    if (sd) {
+        load_virtual_sd_card(sd);
+    }
+
+    if (psio) {
+        inject_boot_stub(bios_rom);
+        printf("PSIO boot stub injected.\n");
+    }
+
+    cpu_reset(0xBFC00000);
+    cpu.halt_on_break = 1;
+
+    uint64_t steps = 0;
+
+    while (!cpu.halted && steps < max_steps) {
+        step_cpu();
+        steps++;
+    }
+
+    printf("Ran %llu steps.\n", (unsigned long long)steps);
+    dump_registers();
+    return 0;
+}
+
 static void
 print_usage(const char *prog)
 {
@@ -378,12 +432,16 @@ print_usage(const char *prog)
             "  %s                              run the SDL windowed emulator\n"
             "  %s --headless <file> [opts]     run a flat binary with no window\n"
             "  %s --exe <file.exe> [opts]      run a PS-EXE headless (conformance)\n"
+            "  %s --boot [opts]                boot the BIOS headless\n"
+            "Boot options (also apply to the windowed emulator):\n"
+            "  --psio              inject the PSIO boot stub over the BIOS entry\n"
+            "  --sd <file>         mount a virtual SD-card image\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
             "  --pc <hex>          entry PC (default = load address)\n"
             "  --steps <n>         max instructions to run\n"
             "  --vram-out <file>   write the 320x240 VRAM region as a PPM image\n",
-            prog, prog, prog);
+            prog, prog, prog, prog);
 }
 
 int
@@ -392,6 +450,7 @@ main(int argc, char *argv[])
     const char *headless_file = NULL;
     const char *exe_file = NULL;
     const char *vram_out = NULL;
+    int boot_mode = 0;
     uint32_t load_addr = 0;
     uint32_t start_pc = 0;
     int have_pc = 0;
@@ -403,6 +462,12 @@ main(int argc, char *argv[])
             headless_file = argv[++i];
         } else if (strcmp(argv[i], "--exe") == 0 && i + 1 < argc) {
             exe_file = argv[++i];
+        } else if (strcmp(argv[i], "--boot") == 0) {
+            boot_mode = 1;
+        } else if (strcmp(argv[i], "--psio") == 0) {
+            g_psio_boot = 1;
+        } else if (strcmp(argv[i], "--sd") == 0 && i + 1 < argc) {
+            g_psio_sd = argv[++i];
         } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
             vram_out = argv[++i];
         } else if (strcmp(argv[i], "--load-addr") == 0 && i + 1 < argc) {
@@ -417,6 +482,10 @@ main(int argc, char *argv[])
             print_usage(argv[0]);
             return 0;
         }
+    }
+
+    if (boot_mode) {
+        return run_boot(g_psio_boot, g_psio_sd, have_steps ? max_steps : 1000);
     }
 
     if (exe_file) {
