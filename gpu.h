@@ -9,7 +9,7 @@ typedef struct {
     uint32_t command_fifo[GPU_FIFO_MAX];
     uint32_t fifo_words_count;
     uint32_t current_packet_length;
-    
+
     // Core Engine Registers
     uint32_t gpu_status; // Exposed via reading 0x1F801814
 } PSX_GPU;

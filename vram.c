@@ -1,4 +1,8 @@
-void psx_gpu_write_pixel_payload(uint32_t two_pixels_word) {
+#include "vram.h"
+
+void
+psx_gpu_write_pixel_payload(uint32_t two_pixels_word)
+{
     // Extract the two sequential 16-bit pixels from the single 32-bit MIPS register stream
     uint16_t pixels[2];
     pixels[0] = two_pixels_word & 0xFFFF;         // Pixel A (Lower 16 bits)

@@ -1,5 +1,6 @@
 #ifndef VRAM_H_
 #define VRAM_H_
+#include <stdint.h>
 #define VRAM_WIDTH  1024
 #define VRAM_HEIGHT 512
 

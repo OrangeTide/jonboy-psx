@@ -3,12 +3,15 @@
 
 unsigned char rom_data[ROM_MAXSIZE]; // TODO: remove this and copy into system_ram[] instead
 
-int rom_load(const char *filename)
+int
+rom_load(const char *filename)
 {
     int result = 0;
     FILE *f = fopen(filename, "rb");
+
     if (f) {
         int ofs = fseek(f, 0, SEEK_END);
+
         if (ofs == -1) {
             perror(filename);
             // result = 0;
@@ -18,6 +21,7 @@ int rom_load(const char *filename)
 
             if (fsize < ROM_MAXSIZE) {
                 int readlen = fread(rom_data, 1, fsize, f);
+
                 if (readlen == -1) {
                     perror("filename");
                 } else if (readlen < fsize) {
@@ -30,6 +34,7 @@ int rom_load(const char *filename)
             }
         }
     }
+
     fclose(f);
     return result;
 }

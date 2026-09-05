@@ -6,15 +6,17 @@ clean-all : clean
 	$(RM) *.d
 run : $(BINDIR)/jonboy
 	./$<
+fmt : # WARNING: this modifies every file without confirmation
+	astyle --style=linux -xB --indent=spaces=4 -f -p *.[ch]
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run
+.PHONY: all clean clean-all run fmt
 ## jonboy
 all :: $(BINDIR)/jonboy
 clean ::
 	$(RM) $(BINDIR)/jonboy
 
-$(BINDIR)/jonboy : cart.c cpu.c dma.c main.c mem.c | $(BINDIR)
+$(BINDIR)/jonboy : cpu.c dma.c gpu.c main.c mem.c rom.c vram.c | $(BINDIR)
 	$(CC) -o $@ -MMD $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 $(BINDIR)/jonboy : CFLAGS:=$(CFLAGS) $(shell pkg-config --cflags sdl3)
 $(BINDIR)/jonboy : LDLIBS:=$(LDLIBS) $(shell pkg-config --libs sdl3)

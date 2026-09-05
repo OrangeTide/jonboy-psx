@@ -91,4 +91,8 @@ typedef struct {
 } R3051_CPU;
 
 extern R3051_CPU cpu;
+
+void step_cpu(void);
+void check_hardware_interrupts(void);
+
 #endif
