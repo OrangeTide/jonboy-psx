@@ -1,22 +1,29 @@
 # JonBoy PlayStation 1 Emulator: Code Review
 
-Date: 2026-09-05
-Scope: full source tree at commit `c1065e3` (cpu, mem, dma, gpu, vram, timer, pad, rom, main).
-Build status: the SDL3 host builds cleanly with `make`. The emulator core does not yet execute any real program.
+Original review date: 2026-09-05, against commit `c1065e3`.
+Reconciled: 2026-09-05, after Milestones 0 through 2.
+Scope: full source tree (cpu, mem, dma, gpu, vram, timer, pad, psio, rom, main).
+
+Status legend used below: **Fixed** (resolved), **Partly done** (some of it
+landed), **Open** (not started). The original diagnosis text is kept for
+context; the status line under each item reflects the current tree.
 
 ## 1. Summary
 
-This is an early skeleton. The file layout is sensible and the individual
-subsystems are each sketched with reasonable structure. The problem is that the
-pieces are not wired together. The CPU does not go through the memory
-translation or MMIO layer, the BIOS is loaded into a buffer that nothing reads,
-the reset vector is never set, and only a handful of instructions are decoded.
-As written, running the program produces a blank window and the CPU spins on
-zeroed RAM.
+This started as an early skeleton with the pieces not wired together. Since then
+the CPU work is done: the core now runs real code. Every memory access goes
+through address translation and the MMIO/region decoder, the BIOS is mapped, the
+reset vector is set, the full common instruction set and the exception path are
+implemented, and the branch and load delay slots are correct. The emulator
+passes its two self-tests and all 29 Peter Lemon CPU conformance tests, and it
+can boot a PSIO firmware image through an injected boot stub.
 
-None of this is unusual for a first pass. The notes below rank the blocking
-mistakes first, then document every gap by subsystem, then lay out a milestone
-path to a bootable emulator.
+What remains is mostly the graphics and peripheral subsystems: GPU primitive
+rasterization, VBLANK and real timers, the controller protocol, and the audio,
+CD-ROM, and GTE units. Those are tracked in the milestone roadmap (section 10).
+
+The notes below rank the original blocking mistakes first, then document each
+gap by subsystem with its current status.
 
 ## 2. What is already correct
 
@@ -33,9 +40,13 @@ These parts are sound and worth keeping:
 
 ## 3. Blocking bugs (fix these first)
 
-These stop the emulator from running anything at all.
+These stopped the emulator from running anything at all. **All four are now
+Fixed** (Milestones 0 and 1).
 
 ### 3.1 The CPU bypasses address translation and MMIO entirely
+**Fixed.** `step_cpu` fetches and accesses memory through `memory_read_*` /
+`memory_write_*`, which translate and dispatch MMIO.
+
 `step_cpu()` fetches and loads with the raw `MEM_READ_32(cpu.PC)` macro, which
 indexes `system_ram[]` directly. It never calls `memory_read_word()` /
 `memory_write_word()` from `mem.c`. Consequences:
@@ -52,6 +63,9 @@ Fix: route every CPU memory access through `memory_read_word` /
 `memory_write_word` (and byte/halfword variants once they exist).
 
 ### 3.2 The reset vector is never set
+**Fixed.** `cpu_reset()` clears state and sets the entry PC; the windowed and
+boot paths reset to `0xBFC00000`.
+
 `cpu` is a zero-initialized global, so `cpu.PC == 0` at startup. A real
 PlayStation resets to `0xBFC00000` (BIOS entry). There is no CPU init routine
 called from `main`. Execution starts reading `system_ram[0]`.
@@ -60,6 +74,9 @@ Fix: add `cpu_reset()` that sets `cpu.PC = 0xBFC00000` and clears register
 state, and call it before the main loop.
 
 ### 3.3 The BIOS is loaded but never mapped
+**Fixed.** `mem_load_bios` fills a `bios_rom[]` array and the decoder maps the
+BIOS region at `0x1FC00000`. (`rom.c`/`rom_data[]` is now vestigial.)
+
 `rom_load()` reads the file into a private `rom_data[]` buffer (the code even
 carries a `TODO` about this). Nothing copies it into the address space, and
 `memory_read_word` has no branch for the BIOS region (physical `0x1FC00000`).
@@ -69,6 +86,9 @@ Fix: give the BIOS its own backing store and decode `0x1FC00000..0x1FC7FFFF`
 in the memory dispatcher, or map it as a region.
 
 ### 3.4 `rom_load` return contract is inverted
+**Fixed.** `rom_load` returns `0` on success and `main` checks it correctly;
+the size comparisons use `size_t`.
+
 `rom_load` returns `1` on success and `0` on failure. `main.c` does
 `if (result != 0) { ...cleanup...; return 1; }`. So a successful BIOS load is
 treated as fatal and the program exits, while a missing file (returns `0`)
@@ -80,7 +100,13 @@ and update both sites. Also note `fread` returns `size_t`; comparing it to
 
 ## 4. CPU correctness gaps
 
+**All items in this section are now Fixed** (Milestones 1 and 2).
+
 ### 4.1 Almost no instructions are implemented
+**Fixed.** The full common instruction set is implemented (SPECIAL, REGIMM,
+immediate ALU, `LUI`, `J`/`JAL`, and all loads/stores including the unaligned
+`LWL`/`LWR`/`SWL`/`SWR`). Verified by `test1.asm` and the 29 conformance tests.
+
 Handled: `BEQ`, `BNE`, `J`, `ADDIU`, `LW`, partial `COP0`. The `SPECIAL`
 group (opcode `0x00`) is an empty `break`, so none of `ADD/ADDU/SUB/SUBU/
 AND/OR/XOR/NOR/SLT/SLTU/SLL/SRL/SRA/SLLV/SRLV/SRAV/JR/JALR/MULT/MULTU/DIV/
@@ -93,10 +119,18 @@ SWL/SWR`. The bundled `test1.asm` uses `ori`, `li` (which is `lui`+`ori`),
 are unimplemented, so the test cannot pass yet.
 
 ### 4.2 HI / LO registers are missing from the CPU state
+**Fixed.** `hi`/`lo` are in the CPU state and `MULT`/`MULTU`/`DIV`/`DIVU` and
+`MFHI`/`MTHI`/`MFLO`/`MTLO` are implemented, including the divide edge cases.
+
 `R3051_CPU` has no `hi`/`lo` fields, so `MULT`/`DIV`/`MFHI`/`MFLO` cannot be
 implemented. Add them.
 
 ### 4.3 Branch-delay handling is fragile and has dead code
+**Fixed.** Replaced with a `PC`/`next_pc` model; `current_pc`/`in_delay_slot`
+feed correct EPC/BD reporting. One known simplification remains: in a
+load-delay slot that writes the loaded register, the load currently wins (not
+exercised by any current test).
+
 The `DELAY_STATE_JUMPING -> DELAY_STATE_DELAY_SLOT` transition is written
 twice (once at the top, once again a few lines down). The second block can
 never fire. The overall flow happens to work for the simple cases, but the
@@ -106,16 +140,27 @@ transition, and consider tracking `next_pc` explicitly rather than a state
 enum.
 
 ### 4.4 No store path from the CPU
+**Fixed.** All stores route through `memory_write_*`, honoring the SR cache
+isolation bit.
+
 Even once `SW` is decoded, there is no CPU call into `memory_write_word`, so
 the CPU currently cannot write RAM or any hardware register. This is the store
 half of 3.1.
 
 ### 4.5 No byte or halfword memory access
+**Fixed.** `memory_read/write_byte` and `_halfword` exist and the sub-word
+load/store opcodes use them.
+
 `mem.c` only exposes word functions. Many registers and most game data use
 8- and 16-bit access. Add `memory_read_byte/halfword` and matching writes, and
 wire the sub-word load/store opcodes to them.
 
 ### 4.6 Exception and interrupt handling is partial
+**Fixed.** A shared `raise_exception` handles SYSCALL, BREAK, arithmetic
+overflow, and address errors, with correct EPC/BD and the BEV vector choice.
+Interrupts are recognized at instruction boundaries using the full CAUSE.IP vs
+SR.IM comparison. Covered by `test2.asm`.
+
 `check_hardware_interrupts` only inspects `SR_IM2` and only vectors a single
 combined line. It hardcodes `0x80000080` and ignores the `BEV` bit (which is
 set at boot, so the real boot vector is `0xBFC00180`). It does not populate the
@@ -126,6 +171,10 @@ be revisited before the BIOS boots.
 ## 5. Memory map gaps
 
 ### 5.1 RAM size and mirroring
+**Fixed.** `mem_read`/`mem_write` decode by region: 2 MB RAM mirrored across
+`0x00000000..0x007FFFFF`, scratchpad, BIOS, the PSIO windows, and MMIO, with
+bounds guards.
+
 `system_ram` is 4 MB (`4096*1024`); PS1 main RAM is 2 MB, mirrored four times
 across `0x00000000..0x007FFFFF`. There is no region decoding: `TO_PHYSICAL`
 masks to `0x1FFFFFFF` (512 MB) and then indexes `system_ram[p_addr]`. Any
@@ -134,6 +183,9 @@ out-of-bounds index. Introduce a proper region decoder (RAM, scratchpad, MMIO,
 BIOS, expansion) instead of one flat array.
 
 ### 5.2 Scratchpad collides with the MMIO base
+**Fixed.** The decoder checks the scratchpad region (`0x1F800000..0x1F8003FF`)
+before the I/O block, so the two no longer overlap in practice.
+
 `MMIO_BASE` is set to `0x1F800000`, but that address is the scratchpad
 (D-cache used as fast RAM). Hardware registers start at `0x1F801000`. The
 current code treats scratchpad accesses as MMIO and its offset math
@@ -141,6 +193,9 @@ current code treats scratchpad accesses as MMIO and its offset math
 (`0x1F800000..0x1F8003FF`) from the I/O block (`0x1F801000..`).
 
 ### 5.3 The DMA write dispatch has contradictory branches
+**Open.** The hardcoded `0x10A8`/`0x10AC`/`0x10B0` cases in `write_hardware_word`
+still coexist with the generic DMA decoder and should be removed.
+
 In `write_hardware_word`, the generic DMA decoder (`0x1080..0x10E8`) already
 handles per-channel `madr`/`bcr`/`chcr` and triggers transfers. The following
 `switch` then also has hardcoded cases `0x10A8`/`0x10AC`/`0x10B0` that call
@@ -151,18 +206,25 @@ registers.
 
 ## 6. DMA gaps
 
-- Only channel 6 (OTC) and only SyncMode 0 are implemented. Linked-list mode
-  (SyncMode 2), which channel 2 uses to stream GPU command lists, is missing.
-  This is the single most important DMA path for getting graphics on screen.
-- Block mode (SyncMode 1) is missing.
-- Every non-OTC channel still marks itself complete and raises the interrupt
-  even though no data moved.
-- DMA does not actually feed the GPU: even the OTC clear does not push anything
-  to `psx_gpu_send_command_gp0`.
+**Partly done.** `run_dma_transfer` now dispatches per channel through a shared
+`dma_finish` completion path (OTC on channel 6, PSIO SD reads on channel 3),
+and `dma_finish` uses the correct DICR enable/flag fields.
+
+Still open:
+- Linked-list mode (SyncMode 2), which the GPU uses to stream command lists, is
+  missing. This is the single most important DMA path for graphics.
+- Block mode (SyncMode 1) is missing for the GPU/SPU channels.
+- Unimplemented channels still run `dma_finish` (deliberately, so the guest is
+  not left waiting on the start bit), but move no data.
+- DMA does not feed the GPU yet.
 
 ## 7. GPU gaps
 
 ### 7.1 Copy-paste error breaks CPU-to-VRAM transfer
+**Fixed.** The `0xA0` CPU-to-VRAM transfer sets up the streaming state
+correctly and `0x02` fill-rect is implemented; the framebuffer renders (proven
+by the conformance tests, which draw their PASS/FAIL glyphs this way).
+
 In `execute_completed_gp0_command`, the `0xA0` case only adjusts packet length,
 while the code that actually sets `vram.transfer_*` and `is_transfer_active`
 sits under `case 0x40:` (labeled, incorrectly, as the `0xA0` handler). `0x40`
@@ -170,11 +232,15 @@ is a line-draw opcode. As a result the image-upload path never arms, and the
 one working pixel route in the whole GPU is unreachable.
 
 ### 7.2 No rasterization
+**Open.** This is the main remaining GPU work (Milestone 4).
+
 Triangle, quad, rectangle, and shaded-primitive rasterization are all stubbed
 (`psx_rasterize_triangle` is commented out). Only raw pixel upload would draw
 anything, and per 7.1 that path is currently broken. Nothing renders.
 
 ### 7.3 VRAM layout and the render loop
+**Open.** Still column-major; not a correctness bug, worth flipping later.
+
 `vram.canvas` is declared `[VRAM_WIDTH][VRAM_HEIGHT]` and indexed `[x][y]`,
 which is column-major and strided for a row-major blit. The
 "optimized for cache line streaming" comment in `main.c` describes the
@@ -183,11 +249,16 @@ opposite of what the access pattern does. VRAM is conventionally addressed
 flipped for both clarity and speed.
 
 ### 7.4 GP1 and status are minimal
+**Open.** Unchanged since the original review.
+
 Display-mode, display-area, and horizontal/vertical range GP1 commands are not
 handled. `psx_gpu_get_status` fakes the ready bits, which is fine for now, but
 it never reflects the real drawing or DMA state.
 
 ## 8. Timing, interrupts, and peripherals
+
+**Mostly open.** The interrupt-recognition path itself is now correct (see 4.6),
+but everything that would drive it, and the peripherals, are still stubs.
 
 - The frame loop is placeholder timing. `CYCLES_PER_FRAME` is 1000 (debug),
   `TARGET_FPS` is 15, yet the comment claims "564,480 instructions to match
@@ -205,6 +276,10 @@ it never reflects the real drawing or DMA state.
 
 ## 9. Build and documentation issues
 
+**Fixed.** The README now documents the SDL3 build, the testing process, and the
+`mipsel-unknown-elf` toolchain prerequisite. The test carts are built with
+`objcopy -j .text -j .data` and are small (the 4 MB padding is gone).
+
 - `README.md` is inconsistent with the code. It lists `libglfw3-dev` and a
   WASM/WebGL2 path, but the code and Makefile use SDL3, and there is no
   emscripten target. `emmake` alone is also not a command (it wraps make, as
@@ -220,14 +295,17 @@ it never reflects the real drawing or DMA state.
 Each milestone should end in something observable. Build tests before or
 alongside the CPU work so you always have a pass/fail signal.
 
-### Milestone 0: Test harness and headless mode
+### Milestone 0: Test harness and headless mode (DONE)
+Status: done. Headless `--headless` mode dumps registers and memory, `BREAK`/
+`SYSCALL` halt the CPU for the harness, and the `rom_load` contract is fixed.
 - Add a headless run mode (no SDL window) that loads a flat binary at a known
   address, runs N instructions, then dumps registers and a memory range.
 - Add a `BREAK`/`SYSCALL` handler that halts and prints `$s0` so `test1.asm`
   can report which sub-test failed.
 - Fix `rom_load`'s return convention and the `main.c` check (bug 3.4).
 
-### Milestone 1: A CPU that passes the bundled self-test
+### Milestone 1: A CPU that passes the bundled self-test (DONE)
+Status: done. `test1.asm` reports `$s0 == 0xDEADBEEF`.
 - Route all fetches and loads/stores through `memory_read_*` /
   `memory_write_*` (bug 3.1). Add byte and halfword accessors.
 - Set the reset vector and add `cpu_reset()` (bug 3.2).
@@ -239,7 +317,13 @@ alongside the CPU work so you always have a pass/fail signal.
 - Rewrite the delay-slot state machine cleanly (gap 4.3).
 - Goal: `test1.asm` reports `$s0 == 0xDEADBEEF`.
 
-### Milestone 2: Third-party CPU conformance
+### Milestone 2: Third-party CPU conformance (DONE)
+Status: done. All 29 Peter Lemon per-opcode CPU tests pass via the `--exe`
+runner (`make conformance`), and the exception path is implemented and covered
+by `test2.asm`. Two follow-ups remain open: Amidog's `psxtest_cpu.exe` needs GPU
+primitive rasterization and VBLANK timing before it renders (deferred to later
+milestones), and a golden-log comparison against a reference emulator is not yet
+set up.
 - Run an external MIPS/CPU test suite (see section 11) and drive the pass rate
   up. Add a golden-log comparison against a reference emulator if possible.
 - Implement `SYSCALL`/`BREAK`/overflow exceptions and a correct general
