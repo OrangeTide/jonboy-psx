@@ -18,6 +18,7 @@
 static int g_psio_boot = 0;               // inject the PSIO boot stub over the BIOS
 static const char *g_psio_sd = NULL;       // optional SD-card image to mount
 static const char *g_psio_firmware = NULL; // optional PSIO firmware ROM image
+static const char *g_bios_path = "bios.bin"; // BIOS image to load
 
 #define TARGET_FPS 15
 #define CYCLES_PER_FRAME 1000 // TODO: this low value is for debug purposes
@@ -108,7 +109,7 @@ jonboy_runapp(int argc, char *argv[])
     // 3. Load the BIOS image into the mapped BIOS region (0x1FC00000).
     // A missing BIOS is not fatal during development: the window still opens,
     // the CPU just runs zeroed ROM.
-    if (mem_load_bios("bios.bin") == 0) {
+    if (mem_load_bios(g_bios_path) == 0) {
         printf("BIOS loaded.\n");
     } else {
         printf("No BIOS loaded, continuing with blank ROM.\n");
@@ -406,7 +407,7 @@ run_exe(const char *path, uint64_t max_steps, const char *vram_out)
 static int
 run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps)
 {
-    if (mem_load_bios("bios.bin") == 0) {
+    if (mem_load_bios(g_bios_path) == 0) {
         printf("BIOS loaded.\n");
     } else {
         printf("No BIOS loaded, continuing with blank ROM.\n");
@@ -437,6 +438,8 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps)
 
     printf("Ran %llu steps.\n", (unsigned long long)steps);
     dump_registers();
+    // Show the instructions around where execution ended, to spot poll loops.
+    dump_memory((cpu.PC - 16) & ~0xFu, 8);
     return 0;
 }
 
@@ -450,6 +453,7 @@ print_usage(const char *prog)
             "  %s --exe <file.exe> [opts]      run a PS-EXE headless (conformance)\n"
             "  %s --boot [opts]                boot the BIOS headless\n"
             "Boot options (also apply to the windowed emulator):\n"
+            "  --bios <file>       BIOS image to load (default bios.bin)\n"
             "  --psio              inject the PSIO boot stub over the BIOS entry\n"
             "  --sd <file>         mount a virtual SD-card image\n"
             "  --firmware <file>   load a PSIO firmware ROM image\n"
@@ -487,6 +491,8 @@ main(int argc, char *argv[])
             g_psio_sd = argv[++i];
         } else if (strcmp(argv[i], "--firmware") == 0 && i + 1 < argc) {
             g_psio_firmware = argv[++i];
+        } else if (strcmp(argv[i], "--bios") == 0 && i + 1 < argc) {
+            g_bios_path = argv[++i];
         } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
             vram_out = argv[++i];
         } else if (strcmp(argv[i], "--load-addr") == 0 && i + 1 < argc) {
