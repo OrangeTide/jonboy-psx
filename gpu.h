@@ -47,6 +47,14 @@ typedef struct {
     int32_t pl_prev_x, pl_prev_y;
     int32_t pl_prev_r, pl_prev_g, pl_prev_b;
     int32_t pl_cur_r, pl_cur_g, pl_cur_b;
+
+    // Display output (GP1 03/05/08): the VRAM region shown on screen and how.
+    int32_t disp_x;      // VRAM column of the top-left displayed pixel
+    int32_t disp_y;      // VRAM row of the top-left displayed pixel
+    int32_t disp_w;      // displayed width in pixels (from horizontal res)
+    int32_t disp_h;      // displayed height in pixels (from vertical res)
+    int32_t disp_blank;  // 1 = display disabled (blank screen), 0 = enabled
+    int32_t disp_24bpp;  // 1 = 24-bit color mode, 0 = 15-bit
 } PSX_GPU;
 
 extern PSX_GPU gpu;

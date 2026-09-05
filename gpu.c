@@ -24,6 +24,23 @@ psx_gpu_reset(void)
     gpu.tw_off_x = 0;
     gpu.tw_off_y = 0;
     gpu.pl_active = 0;
+    gpu.disp_x = 0;
+    gpu.disp_y = 0;
+    gpu.disp_w = 320;
+    gpu.disp_h = 240;
+    gpu.disp_blank = 1; // the display is disabled until software enables it
+    gpu.disp_24bpp = 0;
+}
+
+// Decode a GP1(08) display-mode word into the on-screen resolution.
+static void
+set_display_mode(uint32_t v)
+{
+    static const int hres[4] = { 256, 320, 512, 640 };
+
+    gpu.disp_w = (v & 0x40) ? 368 : hres[v & 3];
+    gpu.disp_h = (v & 0x04) ? 480 : 240;
+    gpu.disp_24bpp = (v >> 4) & 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -913,8 +930,21 @@ psx_gpu_send_command_gp1(uint32_t value)
         gpu.pl_active = 0;
         break;
 
-    case 0x08: // Display Mode Setup
-        // Handle PAL vs NTSC refresh rate selection flags
+    case 0x03: // Display Enable (bit 0: 1 = disabled/blank)
+        gpu.disp_blank = value & 1;
+        break;
+
+    case 0x05: // Start of the display area in VRAM
+        gpu.disp_x = value & 0x3FF;
+        gpu.disp_y = (value >> 10) & 0x1FF;
+        break;
+
+    case 0x06: // Horizontal display range (screen timing, not output size)
+    case 0x07: // Vertical display range (screen timing, not output size)
+        break;
+
+    case 0x08: // Display mode (resolution and color depth)
+        set_display_mode(value);
         break;
     }
 }

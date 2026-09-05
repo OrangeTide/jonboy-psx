@@ -7,6 +7,7 @@
 #include <SDL3/SDL_main.h>
 
 #include "cpu.h"
+#include "gpu.h"
 #include "inject.h"
 #include "mem.h"
 #include "psio.h"
@@ -20,8 +21,11 @@ static const char *g_psio_sd = NULL;       // optional SD-card image to mount
 static const char *g_psio_firmware = NULL; // optional PSIO firmware ROM image
 static const char *g_bios_path = "bios.bin"; // BIOS image to load
 
-#define TARGET_FPS 15
-#define CYCLES_PER_FRAME 1000 // TODO: this low value is for debug purposes
+#define TARGET_FPS 60
+
+// The CPU runs at ~33.87 MHz, which is 564480 cycles per 60 Hz frame. Each
+// step_cpu call advances two cycles, so a frame is half that many steps.
+#define STEPS_PER_FRAME (564480 / 2)
 
 int SDLCALL jonboy_runapp(int argc, char *argv[]);
 
@@ -31,6 +35,7 @@ typedef struct {
     SDL_Renderer *renderer;
     SDL_Texture *vram_texture; // Target texture handle for rendering
     bool is_running;
+    bool full_vram_view;       // F1 toggles between display area and full VRAM
 } AppContext;
 
 static void
@@ -67,9 +72,19 @@ render_vram_to_screen(AppContext* app)
     SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 255);
     SDL_RenderClear(app->renderer);
 
-    // SDL_RenderTexture automatically handles stretching the 1024x512 texture
-    // to whatever dimensions your actual SDL_Window currently spans.
-    SDL_RenderTexture(app->renderer, app->vram_texture, NULL, NULL);
+    if (app->full_vram_view) {
+        // Debug view: show the entire 1024x512 VRAM stretched to the window.
+        SDL_RenderTexture(app->renderer, app->vram_texture, NULL, NULL);
+    } else if (!gpu.disp_blank) {
+        // Normal view: show only the GPU's display area, as a TV would. When
+        // the display is disabled the window stays cleared (black).
+        SDL_FRect src = {
+            (float)gpu.disp_x, (float)gpu.disp_y,
+            (float)gpu.disp_w, (float)gpu.disp_h
+        };
+        SDL_RenderTexture(app->renderer, app->vram_texture, &src, NULL);
+    }
+
     SDL_RenderPresent(app->renderer);
 }
 
@@ -150,6 +165,8 @@ jonboy_runapp(int argc, char *argv[])
             } else if (event.type == SDL_EVENT_KEY_DOWN) {
                 if (event.key.key == SDLK_ESCAPE) {
                     app.is_running = false;
+                } else if (event.key.key == SDLK_F1) {
+                    app.full_vram_view = !app.full_vram_view;
                 }
             }
         }
@@ -163,8 +180,8 @@ jonboy_runapp(int argc, char *argv[])
         // Process a complete frame chunk if our time accumulator step threshold is passed
         while (accumulator >= time_bridge) {
 
-            // Execute exactly 564,480 sequential MIPS CPU instructions to match 60Hz timing
-            for (uint32_t cycle = 0; cycle < CYCLES_PER_FRAME; cycle++) {
+            // Run one frame's worth of CPU steps to match 60 Hz timing.
+            for (uint32_t step = 0; step < STEPS_PER_FRAME; step++) {
                 if (cpu.halted) {
                     break;
                 }
