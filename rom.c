@@ -1,9 +1,9 @@
-#include "cart.h"
+#include "rom.h"
 #include <stdio.h>
 
-unsigned char cart_data[CART_MAXSIZE];
+unsigned char rom_data[ROM_MAXSIZE]; // TODO: remove this and copy into system_ram[] instead
 
-int cart_load(const char *filename)
+int rom_load(const char *filename)
 {
     int result = 0;
     FILE *f = fopen(filename, "rb");
@@ -16,8 +16,8 @@ int cart_load(const char *filename)
             int fsize = ftell(f);
             fseek(f, 0, SEEK_SET);
 
-            if (fsize < CART_MAXSIZE) {
-                int readlen = fread(cart_data, 1, fsize, f);
+            if (fsize < ROM_MAXSIZE) {
+                int readlen = fread(rom_data, 1, fsize, f);
                 if (readlen == -1) {
                     perror("filename");
                 } else if (readlen < fsize) {
@@ -33,4 +33,3 @@ int cart_load(const char *filename)
     fclose(f);
     return result;
 }
-
