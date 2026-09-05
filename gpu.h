@@ -26,6 +26,14 @@ typedef struct {
     int32_t tex_page_x;
     int32_t tex_page_y;
     int32_t tex_depth;     // 0 = 4-bit CLUT, 1 = 8-bit CLUT, 2/3 = 15-bit
+    int32_t tex_semi_mode; // semi-transparency blend function (0-3)
+
+    // Texture window (GP0 0xE2), in 8-texel units. Repeats a sub-region of
+    // the texture page across texture coordinates.
+    int32_t tw_mask_x;
+    int32_t tw_mask_y;
+    int32_t tw_off_x;
+    int32_t tw_off_y;
 } PSX_GPU;
 
 extern PSX_GPU gpu;

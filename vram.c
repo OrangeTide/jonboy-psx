@@ -34,3 +34,34 @@ psx_gpu_write_pixel_payload(uint32_t two_pixels_word)
         }
     }
 }
+
+// Return the next 32-bit word (two pixels) of a VRAM-to-CPU read stream,
+// advancing the read pointer. Reads past the end return zero.
+uint32_t
+psx_gpu_read_pixel_payload(void)
+{
+    uint32_t word = 0;
+
+    for (int i = 0; i < 2; i++) {
+        if (!vram.is_read_active) {
+            break;
+        }
+
+        uint32_t x = vram.rd_current_x & (VRAM_WIDTH - 1);
+        uint32_t y = vram.rd_current_y & (VRAM_HEIGHT - 1);
+        word |= (uint32_t)vram.canvas[x][y] << (i * 16);
+
+        vram.rd_current_x++;
+
+        if (vram.rd_current_x >= (vram.rd_start_x + vram.rd_width)) {
+            vram.rd_current_x = vram.rd_start_x;
+            vram.rd_current_y++;
+
+            if (vram.rd_current_y >= (vram.rd_start_y + vram.rd_height)) {
+                vram.is_read_active = 0;
+            }
+        }
+    }
+
+    return word;
+}

@@ -18,6 +18,11 @@ psx_gpu_reset(void)
     gpu.tex_page_x = 0;
     gpu.tex_page_y = 0;
     gpu.tex_depth = 0;
+    gpu.tex_semi_mode = 0;
+    gpu.tw_mask_x = 0;
+    gpu.tw_mask_y = 0;
+    gpu.tw_off_x = 0;
+    gpu.tw_off_y = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +41,15 @@ typedef struct {
     int depth;          // 0 = 4-bit CLUT, 1 = 8-bit CLUT, 2/3 = 15-bit
     int clut_x, clut_y; // palette base, in VRAM pixels
 } TexInfo;
+
+// Per-primitive rendering state passed to the rasterizer.
+typedef struct {
+    int textured;
+    int raw;       // raw texture: draw the texel without color modulation
+    int semi;      // semi-transparency enabled (the primitive's ABE bit)
+    int semi_mode; // semi-transparency blend function (0-3)
+    TexInfo tex;
+} PrimState;
 
 static uint16_t
 rgb_to_555(int r, int g, int b)
@@ -75,7 +89,54 @@ set_texpage_bits(uint32_t tp)
 {
     gpu.tex_page_x = (tp & 0x0F) * 64;
     gpu.tex_page_y = ((tp >> 4) & 1) * 256;
+    gpu.tex_semi_mode = (tp >> 5) & 3;
     gpu.tex_depth = (tp >> 7) & 3;
+}
+
+// Blend a foreground pixel over the background already in VRAM, using one of
+// the four PSX semi-transparency functions. Values are BGR555.
+static uint16_t
+blend_555(uint16_t back, uint16_t fore, int mode)
+{
+    int br = back & 0x1F, bg = (back >> 5) & 0x1F, bb = (back >> 10) & 0x1F;
+    int fr = fore & 0x1F, fg = (fore >> 5) & 0x1F, fb = (fore >> 10) & 0x1F;
+    int r, g, b;
+
+    switch (mode) {
+    case 0: // B/2 + F/2
+        r = (br + fr) / 2; g = (bg + fg) / 2; b = (bb + fb) / 2;
+        break;
+    case 1: // B + F
+        r = br + fr; g = bg + fg; b = bb + fb;
+        break;
+    case 2: // B - F
+        r = br - fr; g = bg - fg; b = bb - fb;
+        break;
+    default: // B + F/4
+        r = br + fr / 4; g = bg + fg / 4; b = bb + fb / 4;
+        break;
+    }
+
+    if (r < 0) r = 0;
+    if (r > 31) r = 31;
+    if (g < 0) g = 0;
+    if (g > 31) g = 31;
+    if (b < 0) b = 0;
+    if (b > 31) b = 31;
+
+    return (uint16_t)((b << 10) | (g << 5) | r);
+}
+
+// Write one pixel to VRAM, blending against the current contents when the
+// primitive is semi-transparent.
+static void
+put_pixel(int x, int y, uint16_t fore, int blend, int mode)
+{
+    if (blend) {
+        vram.canvas[x][y] = blend_555(vram.canvas[x][y], fore, mode);
+    } else {
+        vram.canvas[x][y] = fore;
+    }
 }
 
 // Sample a texel with affine (non-perspective) coordinates. Returns the raw
@@ -87,6 +148,11 @@ sample_texel(const TexInfo *t, int u, int v)
 
     u &= 0xFF;
     v &= 0xFF;
+
+    // Texture window: repeat a sub-region of the page. Mask and offset are in
+    // 8-texel units. With all fields zero this leaves the coordinate untouched.
+    u = (u & ~(gpu.tw_mask_x * 8)) | ((gpu.tw_off_x & gpu.tw_mask_x) * 8);
+    v = (v & ~(gpu.tw_mask_y * 8)) | ((gpu.tw_off_y & gpu.tw_mask_y) * 8);
 
     if (t->depth == 0) {        // 4-bit CLUT: four texels per VRAM word
         uint16_t word = vram.canvas[(t->page_x + (u >> 2)) & (VRAM_WIDTH - 1)]
@@ -154,7 +220,7 @@ max3(int a, int b, int c)
 // coordinates are interpolated affinely, as the real PSX GPU does.
 static void
 draw_triangle(RVertex v0, RVertex v1, RVertex v2,
-              int gouraud, int textured, const TexInfo *tex)
+              int gouraud, const PrimState *ps)
 {
     int x0 = v0.x << 4, y0 = v0.y << 4;
     int x1 = v1.x << 4, y1 = v1.y << 4;
@@ -239,20 +305,29 @@ draw_triangle(RVertex v0, RVertex v1, RVertex v2,
                     b = v0.b;
                 }
 
-                if (textured) {
+                if (ps->textured) {
                     int u = (int)(v0.u * bary0 + v1.u * bary1 + v2.u * bary2 + 0.5f);
                     int vv = (int)(v0.v * bary0 + v1.v * bary1 + v2.v * bary2 + 0.5f);
-                    int texel = sample_texel(tex, u, vv);
+                    int texel = sample_texel(&ps->tex, u, vv);
 
                     if (texel >= 0) {
                         int tr, tg, tb;
                         unpack_555((uint16_t)texel, &tr, &tg, &tb);
-                        vram.canvas[px][py] = rgb_to_555(modulate(tr, r),
-                                                         modulate(tg, g),
-                                                         modulate(tb, b));
+
+                        if (!ps->raw) {
+                            tr = modulate(tr, r);
+                            tg = modulate(tg, g);
+                            tb = modulate(tb, b);
+                        }
+
+                        // Blend only texels whose STP bit is set.
+                        int blend = ps->semi && (texel & 0x8000);
+                        put_pixel(px, py, rgb_to_555(tr, tg, tb), blend,
+                                  ps->semi_mode);
                     }
                 } else {
-                    vram.canvas[px][py] = rgb_to_555(r, g, b);
+                    put_pixel(px, py, rgb_to_555(r, g, b), ps->semi,
+                              ps->semi_mode);
                 }
             }
 
@@ -272,7 +347,7 @@ draw_triangle(RVertex v0, RVertex v1, RVertex v2,
 // (u0,v0) origin, one texel per pixel.
 static void
 draw_rectangle(int x, int y, int w, int h, int r, int g, int b,
-               int textured, const TexInfo *tex, int u0, int v0)
+               const PrimState *ps, int u0, int v0)
 {
     int ox = x, oy = y;
     int x1 = x + w - 1;
@@ -291,18 +366,26 @@ draw_rectangle(int x, int y, int w, int h, int r, int g, int b,
 
     for (int py = y; py <= y1; py++) {
         for (int px = x; px <= x1; px++) {
-            if (textured) {
-                int texel = sample_texel(tex, u0 + (px - ox), v0 + (py - oy));
+            if (ps->textured) {
+                int texel = sample_texel(&ps->tex, u0 + (px - ox),
+                                         v0 + (py - oy));
 
                 if (texel >= 0) {
                     int tr, tg, tb;
                     unpack_555((uint16_t)texel, &tr, &tg, &tb);
-                    vram.canvas[px][py] = rgb_to_555(modulate(tr, r),
-                                                     modulate(tg, g),
-                                                     modulate(tb, b));
+
+                    if (!ps->raw) {
+                        tr = modulate(tr, r);
+                        tg = modulate(tg, g);
+                        tb = modulate(tb, b);
+                    }
+
+                    int blend = ps->semi && (texel & 0x8000);
+                    put_pixel(px, py, rgb_to_555(tr, tg, tb), blend,
+                              ps->semi_mode);
                 }
             } else {
-                vram.canvas[px][py] = solid;
+                put_pixel(px, py, solid, ps->semi, ps->semi_mode);
             }
         }
     }
@@ -399,11 +482,14 @@ draw_polygon(uint32_t opcode, uint32_t *buffer)
 {
     int quad = opcode & 0x08;
     int gouraud = opcode & 0x10;
-    int textured = opcode & 0x04;
     int nverts = quad ? 4 : 3;
 
+    PrimState ps = {0};
+    ps.textured = opcode & 0x04;
+    ps.raw = opcode & 0x01;
+    ps.semi = opcode & 0x02;
+
     RVertex v[4];
-    TexInfo tex = {0};
     uint32_t color0 = buffer[0] & 0xFFFFFF;
     int idx = 1;
 
@@ -417,15 +503,15 @@ draw_polygon(uint32_t opcode, uint32_t *buffer)
         uint32_t pos = buffer[idx++];
         uint32_t tc = 0;
 
-        if (textured) {
+        if (ps.textured) {
             tc = buffer[idx++];
 
             // Vertex 0 carries the CLUT, vertex 1 the texture page. Both are
             // in the upper half of the texcoord word.
             if (i == 0) {
                 uint32_t clut = (tc >> 16) & 0xFFFF;
-                tex.clut_x = (clut & 0x3F) * 16;
-                tex.clut_y = (clut >> 6) & 0x1FF;
+                ps.tex.clut_x = (clut & 0x3F) * 16;
+                ps.tex.clut_y = (clut >> 6) & 0x1FF;
             } else if (i == 1) {
                 set_texpage_bits((tc >> 16) & 0xFFFF);
             }
@@ -440,16 +526,20 @@ draw_polygon(uint32_t opcode, uint32_t *buffer)
         v[i].v = (tc >> 8) & 0xFF;
     }
 
-    if (textured) {
-        tex.page_x = gpu.tex_page_x;
-        tex.page_y = gpu.tex_page_y;
-        tex.depth = gpu.tex_depth;
+    if (ps.textured) {
+        ps.tex.page_x = gpu.tex_page_x;
+        ps.tex.page_y = gpu.tex_page_y;
+        ps.tex.depth = gpu.tex_depth;
     }
 
-    draw_triangle(v[0], v[1], v[2], gouraud, textured, &tex);
+    // Semi-transparency mode is taken from the current draw mode, updated by
+    // this primitive's own texpage word above when it is textured.
+    ps.semi_mode = gpu.tex_semi_mode;
+
+    draw_triangle(v[0], v[1], v[2], gouraud, &ps);
 
     if (quad) {
-        draw_triangle(v[1], v[2], v[3], gouraud, textured, &tex);
+        draw_triangle(v[1], v[2], v[3], gouraud, &ps);
     }
 }
 
@@ -457,29 +547,33 @@ draw_polygon(uint32_t opcode, uint32_t *buffer)
 static void
 draw_rect_command(uint32_t opcode, uint32_t *buffer)
 {
-    int textured = opcode & 0x04;
     int size = (opcode >> 3) & 0x03;
+
+    PrimState ps = {0};
+    ps.textured = opcode & 0x04;
+    ps.raw = opcode & 0x01;
+    ps.semi = opcode & 0x02;
+    ps.semi_mode = gpu.tex_semi_mode;
 
     uint32_t color = buffer[0] & 0xFFFFFF;
     uint32_t pos = buffer[1];
     int idx = 2;
 
-    TexInfo tex = {0};
     int u0 = 0, v0 = 0;
 
-    if (textured) {
+    if (ps.textured) {
         uint32_t tc = buffer[idx++];
         u0 = tc & 0xFF;
         v0 = (tc >> 8) & 0xFF;
 
         uint32_t clut = (tc >> 16) & 0xFFFF;
-        tex.clut_x = (clut & 0x3F) * 16;
-        tex.clut_y = (clut >> 6) & 0x1FF;
+        ps.tex.clut_x = (clut & 0x3F) * 16;
+        ps.tex.clut_y = (clut >> 6) & 0x1FF;
 
         // Sprites take the texture page from the current draw mode (GP0 0xE1).
-        tex.page_x = gpu.tex_page_x;
-        tex.page_y = gpu.tex_page_y;
-        tex.depth = gpu.tex_depth;
+        ps.tex.page_x = gpu.tex_page_x;
+        ps.tex.page_y = gpu.tex_page_y;
+        ps.tex.depth = gpu.tex_depth;
     }
 
     int w, h;
@@ -498,7 +592,7 @@ draw_rect_command(uint32_t opcode, uint32_t *buffer)
 
     draw_rectangle(vertex_x(pos), vertex_y(pos), w, h,
                    color & 0xFF, (color >> 8) & 0xFF, (color >> 16) & 0xFF,
-                   textured, &tex, u0, v0);
+                   &ps, u0, v0);
 }
 
 void
@@ -542,8 +636,29 @@ execute_completed_gp0_command(uint32_t opcode, uint32_t* buffer)
             gpu.current_packet_length = 0;
             return; // stay open to consume the pixel stream
 
+        case 0xC0: // Copy Rectangle (VRAM to CPU): set up the read stream
+            vram.rd_start_x = buffer[1] & 0xFFFF;
+            vram.rd_start_y = (buffer[1] >> 16) & 0xFFFF;
+            vram.rd_width  = buffer[2] & 0xFFFF;
+            vram.rd_height = (buffer[2] >> 16) & 0xFFFF;
+
+            if (vram.rd_width == 0) vram.rd_width = VRAM_WIDTH;
+            if (vram.rd_height == 0) vram.rd_height = VRAM_HEIGHT;
+
+            vram.rd_current_x = vram.rd_start_x;
+            vram.rd_current_y = vram.rd_start_y;
+            vram.is_read_active = 1;
+            break;
+
         case 0xE1: // Set draw mode (texture page, color depth, etc.)
             set_texpage_bits(buffer[0] & 0x1FF);
+            break;
+
+        case 0xE2: // Set texture window (mask and offset, in 8-texel units)
+            gpu.tw_mask_x = buffer[0] & 0x1F;
+            gpu.tw_mask_y = (buffer[0] >> 5) & 0x1F;
+            gpu.tw_off_x = (buffer[0] >> 10) & 0x1F;
+            gpu.tw_off_y = (buffer[0] >> 15) & 0x1F;
             break;
 
         case 0xE3: // Set drawing area top-left
@@ -626,10 +741,15 @@ psx_gpu_send_command_gp1(uint32_t value)
     }
 }
 
-// Returns data back to the CPU during a VRAM-to-CPU transfer. Default to safe NOP data.
+// Returns data back to the CPU. During a VRAM-to-CPU transfer this drains the
+// read stream; otherwise there is no GPUREAD result to report.
 uint32_t
 psx_gpu_read_vram_or_gp0()
 {
+    if (vram.is_read_active) {
+        return psx_gpu_read_pixel_payload();
+    }
+
     return 0x00000000;
 }
 
