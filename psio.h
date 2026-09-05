@@ -31,6 +31,7 @@ typedef struct {
 
 extern PsioDevice psio;
 bool load_virtual_sd_card(const char *filepath);
+bool load_psio_firmware(const char *filepath);
 void process_psio_command(void);
 
 // Physical-address accessors for the two PSIO windows, called by the memory

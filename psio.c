@@ -1,7 +1,43 @@
 #include "psio.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 PsioDevice psio;
+
+bool
+load_psio_firmware(const char *filepath)
+{
+    FILE *f = fopen(filepath, "rb");
+
+    if (!f) {
+        perror(filepath);
+        return false;
+    }
+
+    if (!psio.firmware_rom) {
+        psio.firmware_rom = malloc(PSIO_EXP1_SIZE);
+
+        if (!psio.firmware_rom) {
+            fprintf(stderr, "psio firmware: out of memory\n");
+            fclose(f);
+            return false;
+        }
+    }
+
+    // Pad the whole window with zero so bytes past the image read as 0.
+    memset(psio.firmware_rom, 0, PSIO_EXP1_SIZE);
+
+    size_t got = fread(psio.firmware_rom, 1, PSIO_EXP1_SIZE, f);
+    fclose(f);
+
+    if (got == 0) {
+        fprintf(stderr, "%s: empty or unreadable firmware\n", filepath);
+        return false;
+    }
+
+    return true;
+}
 
 bool
 load_virtual_sd_card(const char *filepath)

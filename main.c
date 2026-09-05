@@ -15,8 +15,9 @@
 
 // Boot options shared with the SDL run function (which SDL_RunApp calls with a
 // fixed signature, so they cannot be passed as arguments).
-static int g_psio_boot = 0;         // inject the PSIO boot stub over the BIOS
-static const char *g_psio_sd = NULL; // optional SD-card image to mount
+static int g_psio_boot = 0;               // inject the PSIO boot stub over the BIOS
+static const char *g_psio_sd = NULL;       // optional SD-card image to mount
+static const char *g_psio_firmware = NULL; // optional PSIO firmware ROM image
 
 #define TARGET_FPS 15
 #define CYCLES_PER_FRAME 1000 // TODO: this low value is for debug purposes
@@ -113,8 +114,12 @@ jonboy_runapp(int argc, char *argv[])
         printf("No BIOS loaded, continuing with blank ROM.\n");
     }
 
-    // Optionally mount a virtual SD card and patch the BIOS entry so the CPU
-    // boots into the PSIO firmware instead of the real BIOS.
+    // Optionally load PSIO firmware, mount a virtual SD card, and patch the
+    // BIOS entry so the CPU boots into the PSIO firmware instead of the BIOS.
+    if (g_psio_firmware) {
+        load_psio_firmware(g_psio_firmware);
+    }
+
     if (g_psio_sd) {
         load_virtual_sd_card(g_psio_sd);
     }
@@ -392,12 +397,16 @@ run_exe(const char *path, uint64_t max_steps, const char *vram_out)
 // stub, reset to the boot vector, run, and dump registers. Lets the boot path
 // be exercised and inspected without a window.
 static int
-run_boot(int psio, const char *sd, uint64_t max_steps)
+run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps)
 {
     if (mem_load_bios("bios.bin") == 0) {
         printf("BIOS loaded.\n");
     } else {
         printf("No BIOS loaded, continuing with blank ROM.\n");
+    }
+
+    if (firmware) {
+        load_psio_firmware(firmware);
     }
 
     if (sd) {
@@ -436,6 +445,7 @@ print_usage(const char *prog)
             "Boot options (also apply to the windowed emulator):\n"
             "  --psio              inject the PSIO boot stub over the BIOS entry\n"
             "  --sd <file>         mount a virtual SD-card image\n"
+            "  --firmware <file>   load a PSIO firmware ROM image\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
             "  --pc <hex>          entry PC (default = load address)\n"
@@ -468,6 +478,8 @@ main(int argc, char *argv[])
             g_psio_boot = 1;
         } else if (strcmp(argv[i], "--sd") == 0 && i + 1 < argc) {
             g_psio_sd = argv[++i];
+        } else if (strcmp(argv[i], "--firmware") == 0 && i + 1 < argc) {
+            g_psio_firmware = argv[++i];
         } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
             vram_out = argv[++i];
         } else if (strcmp(argv[i], "--load-addr") == 0 && i + 1 < argc) {
@@ -485,7 +497,8 @@ main(int argc, char *argv[])
     }
 
     if (boot_mode) {
-        return run_boot(g_psio_boot, g_psio_sd, have_steps ? max_steps : 1000);
+        return run_boot(g_psio_boot, g_psio_sd, g_psio_firmware,
+                        have_steps ? max_steps : 1000);
     }
 
     if (exe_file) {
