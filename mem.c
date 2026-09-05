@@ -76,6 +76,10 @@ mem_read(uint32_t v_addr, int size)
         return psio_read(a, size);
     }
 
+    if (a >= SPU_BASE && a < SPU_BASE + SPU_SIZE) {
+        return psx_spu_read(a, size);
+    }
+
     if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
         uint32_t word = read_hardware_word(a & ~3u);
 
@@ -111,6 +115,11 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
 
     if (in_psio_region(a)) {
         psio_write(a, value, size);
+        return;
+    }
+
+    if (a >= SPU_BASE && a < SPU_BASE + SPU_SIZE) {
+        psx_spu_write(a, value, size);
         return;
     }
 

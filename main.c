@@ -405,7 +405,8 @@ run_exe(const char *path, uint64_t max_steps, const char *vram_out)
 // stub, reset to the boot vector, run, and dump registers. Lets the boot path
 // be exercised and inspected without a window.
 static int
-run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps)
+run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
+         const char *vram_out)
 {
     if (mem_load_bios(g_bios_path) == 0) {
         printf("BIOS loaded.\n");
@@ -440,6 +441,11 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps)
     dump_registers();
     // Show the instructions around where execution ended, to spot poll loops.
     dump_memory((cpu.PC - 16) & ~0xFu, 8);
+
+    if (vram_out) {
+        dump_vram_ppm(vram_out);
+    }
+
     return 0;
 }
 
@@ -511,7 +517,7 @@ main(int argc, char *argv[])
 
     if (boot_mode) {
         return run_boot(g_psio_boot, g_psio_sd, g_psio_firmware,
-                        have_steps ? max_steps : 1000);
+                        have_steps ? max_steps : 1000, vram_out);
     }
 
     if (exe_file) {

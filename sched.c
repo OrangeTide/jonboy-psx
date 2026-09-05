@@ -1,5 +1,6 @@
 #include "sched.h"
 #include "cpu.h"
+#include "spu.h"
 #include "timer.h"
 
 // Approximate NTSC timing: the ~33.87 MHz CPU clock over 60 Hz is about
@@ -13,6 +14,7 @@ psx_hardware_reset(void)
 {
     vblank_acc = 0;
     psx_timers_reset();
+    psx_spu_reset();
 }
 
 void
