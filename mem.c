@@ -8,6 +8,7 @@
 #include "psio.h"
 #include "spu.h"
 #include "timer.h"
+#include <stdio.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,8 +29,15 @@ memory_read_word(uint32_t v_addr)
         return read_hardware_word(p_addr);
     }
 
-    // Fallback to standard RAM fetch macro
-    return MEM_READ_32(p_addr);
+    // Fallback to standard RAM fetch macro. Guard against out-of-range
+    // physical addresses. Full region decoding (RAM mirroring, BIOS,
+    // scratchpad) is a later milestone; for now anything outside the backing
+    // array reads as zero instead of running off the end of it.
+    if ((uint64_t)p_addr + 3 < MEM_MAX_SIZE) {
+        return MEM_READ_32(p_addr);
+    }
+
+    return 0;
 }
 
 void
@@ -42,7 +50,52 @@ memory_write_word(uint32_t v_addr, uint32_t value)
         return;
     }
 
-    MEM_WRITE_32(p_addr, value);
+    // Guard against out-of-range writes for the same reason as the read path.
+    if ((uint64_t)p_addr + 3 < MEM_MAX_SIZE) {
+        MEM_WRITE_32(p_addr, value);
+    }
+}
+
+int
+mem_load_file(const char *filename, uint32_t phys_addr)
+{
+    FILE *f = fopen(filename, "rb");
+
+    if (!f) {
+        perror(filename);
+        return -1;
+    }
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        perror(filename);
+        fclose(f);
+        return -1;
+    }
+
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (fsize < 0) {
+        perror(filename);
+        fclose(f);
+        return -1;
+    }
+
+    if ((uint64_t)phys_addr + (uint64_t)fsize > MEM_MAX_SIZE) {
+        fprintf(stderr, "%s: does not fit in RAM at 0x%08X\n", filename, phys_addr);
+        fclose(f);
+        return -1;
+    }
+
+    size_t readlen = fread(system_ram + phys_addr, 1, (size_t)fsize, f);
+    fclose(f);
+
+    if (readlen != (size_t)fsize) {
+        fprintf(stderr, "%s: short read\n", filename);
+        return -1;
+    }
+
+    return 0;
 }
 
 uint32_t

@@ -36,4 +36,14 @@ extern uint8_t system_ram[MEM_MAX_SIZE];
     system_ram[(addr) + 0] = (uint8_t)((val) & 0xFF);         \
     system_ram[(addr) + 1] = (uint8_t)(((val) >> 8) & 0xFF);  \
 } while(0)
+
+// Address-translating, MMIO-aware accessors. The CPU must go through these,
+// never the raw macros above, so that virtual addresses are converted to
+// physical and hardware registers are dispatched.
+uint32_t memory_read_word(uint32_t v_addr);
+void memory_write_word(uint32_t v_addr, uint32_t value);
+
+// Load a flat binary file straight into system RAM at a physical address.
+// Returns 0 on success, negative on error.
+int mem_load_file(const char *filename, uint32_t phys_addr);
 #endif

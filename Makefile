@@ -25,7 +25,7 @@ all :: $(BINDIR)/test1.cart
 clean ::
 	$(RM) $(BINDIR)/test1.cart $(BINDIR)/test1.elf $(BINDIR)/test1.o
 $(BINDIR)/test1.cart : $(BINDIR)/test1.elf
-	mipsel-unknown-elf-objcopy -O binary $< $@
+	mipsel-unknown-elf-objcopy -O binary -j .text -j .data $< $@
 $(BINDIR)/test1.o : test1.asm
 	mipsel-unknown-elf-as -march=r3000 -mabi=32 -o $@ $<
 $(BINDIR)/test1.elf : $(BINDIR)/test1.o

@@ -6,10 +6,23 @@
 R3051_CPU cpu;
 
 void
+cpu_reset(uint32_t start_pc)
+{
+    // Clear all architectural and delay-tracking state, then set the entry
+    // point. The real reset vector is 0xBFC00000 (BIOS); the harness passes an
+    // explicit address so it can run flat test binaries linked elsewhere.
+    R3051_CPU fresh = { 0 };
+    cpu = fresh;
+    cpu.PC = start_pc;
+}
+
+void
 step_cpu(void)
 {
     // ---- 1. FETCH & DECODE ----
-    uint32_t inst = MEM_READ_32(cpu.PC); // Fetch
+    // Fetch through the translating accessor so the virtual PC is mapped to a
+    // physical address. Never index system_ram[] directly here.
+    uint32_t inst = memory_read_word(cpu.PC); // Fetch
     uint32_t opcode = GET_OPCODE(inst);
     uint32_t rs     = GET_RS(inst);
     uint32_t rt     = GET_RT(inst);
@@ -38,9 +51,25 @@ step_cpu(void)
 
     // ---- 3. EXECUTE CURRENT INSTRUCTION ----
     switch (opcode) {
-    case 0x00: // SPECIAL instructions (like BEQ, BNE, J, etc. use sub-opcodes, simplified here)
-        // Handle regular ALU functions...
-        break;
+    case 0x00: { // SPECIAL: register-register ALU ops selected by the funct field.
+        // Only the halt traps are decoded here for now. The rest of the SPECIAL
+        // group (ADD, OR, SLL, JR, MULT, ...) arrives in Milestone 1.
+        uint32_t funct = GET_FUNCT(inst);
+
+        switch (funct) {
+        case 0x0C: // SYSCALL
+        case 0x0D: // BREAK
+            // Both raise exceptions on real hardware. For the test harness we
+            // treat them as a clean stop so a program can signal completion.
+            cpu.halted = 1;
+            break;
+
+        default:
+            // Unimplemented SPECIAL function: no-op for now.
+            break;
+        }
+    }
+    break;
 
     case 0x04: // BEQ (Branch if Equal)
 
@@ -133,7 +162,7 @@ step_cpu(void)
         // Instead, queue it for the NEXT instruction slot.
         if (rt != 0) { // $0 is hardwired to 0, ignore loads to it
             cpu.load_reg = rt;
-            cpu.load_val = MEM_READ_32(target_addr);
+            cpu.load_val = memory_read_word(target_addr);
         }
     }
     break;

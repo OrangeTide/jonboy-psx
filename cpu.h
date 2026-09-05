@@ -88,10 +88,16 @@ typedef struct {
     // Index 13: CAUSE (Exception Cause Register)
     // Index 14: EPC (Exception Program Counter)
     uint32_t cp0_regs[32];
+
+    // Set when the CPU executes BREAK or SYSCALL. The run loops stop stepping
+    // once this is set. Used by the headless test harness to know a program
+    // has signalled completion.
+    uint8_t  halted;
 } R3051_CPU;
 
 extern R3051_CPU cpu;
 
+void cpu_reset(uint32_t start_pc);
 void step_cpu(void);
 void check_hardware_interrupts(void);
 
