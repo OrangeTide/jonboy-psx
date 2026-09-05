@@ -34,6 +34,19 @@ typedef struct {
     int32_t tw_mask_y;
     int32_t tw_off_x;
     int32_t tw_off_y;
+
+    // Poly-line parsing state (GP0 0x48-0x4F, 0x58-0x5F). Poly-lines have no
+    // fixed length, so their vertices are consumed one at a time and each new
+    // segment is drawn immediately, until a termination code arrives.
+    int32_t pl_active;
+    int32_t pl_shaded;
+    int32_t pl_semi;
+    int32_t pl_semi_mode;
+    int32_t pl_count;        // vertices received so far
+    int32_t pl_expect_color; // shaded: next word is a color, not a vertex
+    int32_t pl_prev_x, pl_prev_y;
+    int32_t pl_prev_r, pl_prev_g, pl_prev_b;
+    int32_t pl_cur_r, pl_cur_g, pl_cur_b;
 } PSX_GPU;
 
 extern PSX_GPU gpu;

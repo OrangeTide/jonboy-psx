@@ -23,6 +23,7 @@ psx_gpu_reset(void)
     gpu.tw_mask_y = 0;
     gpu.tw_off_x = 0;
     gpu.tw_off_y = 0;
+    gpu.pl_active = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +392,69 @@ draw_rectangle(int x, int y, int w, int h, int r, int g, int b,
     }
 }
 
+static int
+iabs(int v)
+{
+    return v < 0 ? -v : v;
+}
+
+// Draw a line between two vertices with Bresenham's algorithm, clipped to the
+// drawing area. Color is flat (v0) or interpolated along the span; both flat
+// and shaded lines honor semi-transparency.
+static void
+draw_line(RVertex a, RVertex b, int shaded, int semi, int mode)
+{
+    int x0 = a.x, y0 = a.y, x1 = b.x, y1 = b.y;
+
+    // The GPU rejects lines whose span exceeds the coordinate range.
+    if (iabs(x1 - x0) > 1023 || iabs(y1 - y0) > 511) {
+        return;
+    }
+
+    int dx = iabs(x1 - x0);
+    int dy = iabs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    int steps = dx > dy ? dx : dy;
+    int i = 0;
+
+    for (;;) {
+        int r = a.r, g = a.g, bl = a.b;
+
+        if (shaded && steps > 0) {
+            float t = (float)i / (float)steps;
+            r = (int)(a.r + (b.r - a.r) * t + 0.5f);
+            g = (int)(a.g + (b.g - a.g) * t + 0.5f);
+            bl = (int)(a.b + (b.b - a.b) * t + 0.5f);
+        }
+
+        if (x0 >= gpu.draw_x0 && x0 <= gpu.draw_x1 &&
+            y0 >= gpu.draw_y0 && y0 <= gpu.draw_y1 &&
+            x0 >= 0 && x0 < VRAM_WIDTH && y0 >= 0 && y0 < VRAM_HEIGHT) {
+            put_pixel(x0, y0, rgb_to_555(r, g, bl), semi, mode);
+        }
+
+        if (x0 == x1 && y0 == y1) {
+            break;
+        }
+
+        int e2 = 2 * err;
+
+        if (e2 > -dy) {
+            err -= dy;
+            x0 += sx;
+        }
+
+        if (e2 < dx) {
+            err += dx;
+            y0 += sy;
+        }
+
+        i++;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GP0 command handling
 // ---------------------------------------------------------------------------
@@ -595,11 +659,109 @@ draw_rect_command(uint32_t opcode, uint32_t *buffer)
                    &ps, u0, v0);
 }
 
+// Draw a single line primitive (0x40-0x47, 0x50-0x57).
+static void
+draw_line_command(uint32_t opcode, uint32_t *buffer)
+{
+    int shaded = opcode & 0x10;
+    int semi = opcode & 0x02;
+
+    RVertex a, b;
+    uint32_t c0 = buffer[0] & 0xFFFFFF;
+    int idx = 1;
+
+    uint32_t p1 = buffer[idx++];
+    a.x = vertex_x(p1);
+    a.y = vertex_y(p1);
+    a.r = c0 & 0xFF;
+    a.g = (c0 >> 8) & 0xFF;
+    a.b = (c0 >> 16) & 0xFF;
+
+    uint32_t c1 = shaded ? (buffer[idx++] & 0xFFFFFF) : c0;
+    uint32_t p2 = buffer[idx++];
+    b.x = vertex_x(p2);
+    b.y = vertex_y(p2);
+    b.r = c1 & 0xFF;
+    b.g = (c1 >> 8) & 0xFF;
+    b.b = (c1 >> 16) & 0xFF;
+
+    draw_line(a, b, shaded, semi, gpu.tex_semi_mode);
+}
+
+// Begin a poly-line (0x48-0x4F, 0x58-0x5F). The command word carries the color
+// of the first point; vertices then stream in through poly_line_feed.
+static void
+poly_line_start(uint32_t cmd)
+{
+    uint32_t op = cmd >> 24;
+
+    gpu.pl_active = 1;
+    gpu.pl_shaded = op & 0x10;
+    gpu.pl_semi = op & 0x02;
+    gpu.pl_semi_mode = gpu.tex_semi_mode;
+    gpu.pl_count = 0;
+    gpu.pl_expect_color = 0; // the first point's color came with the command
+    gpu.pl_cur_r = cmd & 0xFF;
+    gpu.pl_cur_g = (cmd >> 8) & 0xFF;
+    gpu.pl_cur_b = (cmd >> 16) & 0xFF;
+}
+
+// Consume one poly-line word: a color, a vertex, or the termination code. Each
+// vertex after the first completes a segment, which is drawn immediately.
+static void
+poly_line_feed(uint32_t word)
+{
+    // Once two points exist, a word of the form 0x5xxx5xxx ends the poly-line.
+    if (gpu.pl_count >= 2 && (word & 0xF000F000) == 0x50005000) {
+        gpu.pl_active = 0;
+        return;
+    }
+
+    if (gpu.pl_shaded && gpu.pl_expect_color) {
+        gpu.pl_cur_r = word & 0xFF;
+        gpu.pl_cur_g = (word >> 8) & 0xFF;
+        gpu.pl_cur_b = (word >> 16) & 0xFF;
+        gpu.pl_expect_color = 0;
+        return;
+    }
+
+    int x = vertex_x(word);
+    int y = vertex_y(word);
+
+    if (gpu.pl_count > 0) {
+        RVertex a, b;
+        a.x = gpu.pl_prev_x;
+        a.y = gpu.pl_prev_y;
+        a.r = gpu.pl_prev_r;
+        a.g = gpu.pl_prev_g;
+        a.b = gpu.pl_prev_b;
+        b.x = x;
+        b.y = y;
+        b.r = gpu.pl_cur_r;
+        b.g = gpu.pl_cur_g;
+        b.b = gpu.pl_cur_b;
+        draw_line(a, b, gpu.pl_shaded, gpu.pl_semi, gpu.pl_semi_mode);
+    }
+
+    gpu.pl_prev_x = x;
+    gpu.pl_prev_y = y;
+    gpu.pl_prev_r = gpu.pl_cur_r;
+    gpu.pl_prev_g = gpu.pl_cur_g;
+    gpu.pl_prev_b = gpu.pl_cur_b;
+    gpu.pl_count++;
+
+    if (gpu.pl_shaded) {
+        gpu.pl_expect_color = 1; // the next point needs its own color first
+    }
+}
+
 void
 execute_completed_gp0_command(uint32_t opcode, uint32_t* buffer)
 {
     if (opcode >= 0x20 && opcode <= 0x3F) {
         draw_polygon(opcode, buffer);
+    } else if (opcode >= 0x40 && opcode <= 0x5F) {
+        draw_line_command(opcode, buffer);
     } else if (opcode >= 0x60 && opcode <= 0x7F) {
         draw_rect_command(opcode, buffer);
     } else {
@@ -703,6 +865,21 @@ psx_gpu_send_command_gp0(uint32_t value)
         return;
     }
 
+    // Poly-lines stream vertices with no fixed length; parse them separately.
+    if (gpu.pl_active) {
+        poly_line_feed(value);
+        return;
+    }
+
+    if (gpu.fifo_words_count == 0) {
+        uint32_t op = value >> 24;
+
+        if (op >= 0x40 && op <= 0x5F && (op & 0x08)) {
+            poly_line_start(value);
+            return;
+        }
+    }
+
     // If we are currently starting a completely new command packet stream
     if (gpu.fifo_words_count == 0) {
         gpu.current_packet_length = calculate_gp0_packet_length(value);
@@ -733,6 +910,7 @@ psx_gpu_send_command_gp1(uint32_t value)
     case 0x01: // Clear Command FIFO Buffer
         gpu.fifo_words_count = 0;
         gpu.current_packet_length = 0;
+        gpu.pl_active = 0;
         break;
 
     case 0x08: // Display Mode Setup
