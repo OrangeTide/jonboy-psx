@@ -42,6 +42,17 @@ store_sized(uint8_t *base, uint32_t off, uint32_t value, int size)
     }
 }
 
+// True if a physical address falls in one of the PSIO cartridge windows: the
+// firmware ROM (Expansion Region 1) or the device registers (Expansion
+// Region 2). The register window overlaps the general MMIO block, so this is
+// tested first.
+static int
+in_psio_region(uint32_t a)
+{
+    return (a >= PSIO_EXP1_BASE && a < PSIO_EXP1_BASE + PSIO_EXP1_SIZE)
+           || (a >= PSIO_REG_BASE && a < PSIO_REG_BASE + PSIO_REG_SIZE);
+}
+
 // Decode a physical address to its region and read a sized value. Sub-word
 // reads of MMIO extract the requested bytes from the containing word.
 static uint32_t
@@ -59,6 +70,10 @@ mem_read(uint32_t v_addr, int size)
 
     if (a >= SCRATCH_BASE && a + (uint32_t)size <= SCRATCH_BASE + SCRATCH_SIZE) {
         return load_sized(scratchpad, a - SCRATCH_BASE, size);
+    }
+
+    if (in_psio_region(a)) {
+        return psio_read(a, size);
     }
 
     if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
@@ -91,6 +106,11 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
 
     if (a >= SCRATCH_BASE && a + (uint32_t)size <= SCRATCH_BASE + SCRATCH_SIZE) {
         store_sized(scratchpad, a - SCRATCH_BASE, value, size);
+        return;
+    }
+
+    if (in_psio_region(a)) {
+        psio_write(a, value, size);
         return;
     }
 
@@ -389,51 +409,3 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
     }
 }
 
-uint32_t
-memory_read_parallel_io(uint32_t address)
-{
-    // Mask address to map into the 512KB expansion space
-    uint32_t offset = address & 0x0007FFFF;
-
-    if (address >= 0x1F000000 && address <= 0x1F07FFFF) {
-        // PSX CPU is executing code or reading from the PSIO firmware ROM
-        if (psio.firmware_rom) {
-            return *(uint32_t*)&psio.firmware_rom[offset];
-        }
-        return 0xFFFFFFFF;
-    }
-
-    // Intercept hardware communication registers
-    switch (address) {
-        case 0x1F802000: // Example PSIO Status Register
-            return psio.status_reg;
-
-        case 0x1F802004: // Data FIFO register (Pop data from virtual SD card)
-            if (psio.fifo_count > 0) {
-                uint32_t data = *(uint32_t*)&psio.fifo_buffer[psio.fifo_ptr];
-                psio.fifo_ptr += 4;
-                psio.fifo_count -= 4;
-                return data;
-            }
-            return 0; // FIFO empty
-
-        default:
-            return 0;
-    }
-}
-
-void
-memory_write_parallel_io(uint32_t address, uint32_t value)
-{
-    switch (address) {
-        case 0x1F802000: // Command Register
-            psio.command_reg = value;
-            // Trigger internal emulator logic to process the command (e.g., fetch sector)
-            process_psio_command();
-            break;
-
-        case 0x1F802008: // Sector Address LBA tracking register
-            // Your logic to map value to the file offset in psio.sd_card_file
-            break;
-    }
-}
