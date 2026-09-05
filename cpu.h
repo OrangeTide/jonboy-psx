@@ -62,6 +62,18 @@ enum {
     EXC_OVERFLOW = 0x0C  // Arithmetic overflow
 };
 
+// ============================================================================
+// I_STAT / I_MASK INTERRUPT LINE BIT POSITIONS (0x1F801070 / 0x1F801074)
+// ============================================================================
+#define IRQ_VBLANK 0
+#define IRQ_GPU    1
+#define IRQ_CDROM  2
+#define IRQ_DMA    3
+#define IRQ_TIMER0 4
+#define IRQ_TIMER1 5
+#define IRQ_TIMER2 6
+#define IRQ_PAD    7
+
 // Standard MIPS-I Coprocessor 0 Hardware Register Indices
 enum {
     CP0_REG_INDEX    = 0,   // TLB Index

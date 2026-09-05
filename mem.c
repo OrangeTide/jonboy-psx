@@ -302,6 +302,18 @@ read_hardware_word(uint32_t physical_addr)
         if (reg == 0x8) return dma_channels[channel].chcr;
     }
 
+    // Root counters (0x1F801100 - 0x1F801128): three timers, each with a
+    // value (reg 0), mode (reg 4), and target (reg 8) register.
+    if (offset >= 0x1100 && offset < 0x1130) {
+        int timer = (offset - 0x1100) / 0x10;
+
+        switch (offset & 0xF) {
+        case 0x0: return psx_timer_get_value(timer);
+        case 0x4: return psx_timer_get_mode(timer);
+        case 0x8: return psx_timer_get_target(timer);
+        }
+    }
+
 
     switch (offset) {
     // 2. CONTROLLERS & MEMORY CARDS (0x1F801040)
@@ -325,14 +337,7 @@ read_hardware_word(uint32_t physical_addr)
     case 0x10F4:
         return dma_interrupt;
 
-    // 4. TIMERS (0x1F801100 - 0x1F801128)
-    case 0x1100:
-        return psx_timer_get_value(0);
-
-    case 0x1104:
-        return psx_timer_get_mode(0);
-
-    // 5. GRAPHICS PROCESSING UNIT (GPU) (0x1F801810 - 0x1F801814)
+    // GRAPHICS PROCESSING UNIT (GPU) (0x1F801810 - 0x1F801814)
     case 0x1810:
         return psx_gpu_read_vram_or_gp0();
 
@@ -366,6 +371,17 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
             if ((value & 0x01000000) != 0) {
                 run_dma_transfer(channel);
             }
+        }
+    }
+
+    // Root counters (0x1F801100 - 0x1F801128).
+    if (offset >= 0x1100 && offset < 0x1130) {
+        int timer = (offset - 0x1100) / 0x10;
+
+        switch (offset & 0xF) {
+        case 0x0: psx_timer_set_value(timer, value); return;
+        case 0x4: psx_timer_set_mode(timer, value); return;
+        case 0x8: psx_timer_set_target(timer, value); return;
         }
     }
 

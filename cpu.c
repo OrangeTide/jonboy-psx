@@ -1,7 +1,12 @@
 #include "cpu.h"
 #include "decode.h"
 #include "mem.h"
+#include "sched.h"
 #include <stdint.h>
+
+// Approximate CPU cost charged per instruction. The R3000 averages roughly two
+// cycles per instruction; this drives the VBLANK and timer cadence.
+#define CPU_CYCLES_PER_STEP 2
 
 R3051_CPU cpu;
 
@@ -15,6 +20,7 @@ cpu_reset(uint32_t start_pc)
     cpu = fresh;
     cpu.PC = start_pc;
     cpu.next_pc = start_pc + 4;
+    psx_hardware_reset();
 }
 
 // Schedule a branch. At execute time cpu.PC already points at the delay-slot
@@ -100,6 +106,10 @@ interrupt_pending(void)
 void
 step_cpu(void)
 {
+    // Advance hardware time first so a VBLANK or timer interrupt raised this
+    // step is recognized at the boundary check just below.
+    psx_hardware_tick(CPU_CYCLES_PER_STEP);
+
     // ---- RECOGNIZE PENDING INTERRUPTS ----
     // Interrupts are taken at instruction boundaries, before fetching the next
     // instruction, so EPC names the instruction that has not run yet.

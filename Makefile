@@ -28,12 +28,12 @@ all :: $(BINDIR)/jonboy
 clean ::
 	$(RM) $(BINDIR)/jonboy
 
-$(BINDIR)/jonboy : cpu.c dma.c gpu.c inject.c main.c mem.c pad.c psio.c rom.c timer.c vram.c | $(BINDIR)
+$(BINDIR)/jonboy : cpu.c dma.c gpu.c inject.c main.c mem.c pad.c psio.c rom.c sched.c timer.c vram.c | $(BINDIR)
 	$(CC) -o $@ -MMD $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 $(BINDIR)/jonboy : CFLAGS:=$(CFLAGS) $(shell pkg-config --cflags sdl3)
 $(BINDIR)/jonboy : LDLIBS:=$(LDLIBS) $(shell pkg-config --libs sdl3)
 ## testcarts
-TESTS=test1 test2
+TESTS=test1 test2 test3
 TEST_CARTS=$(TESTS:%=$(BINDIR)/%.cart)
 all :: $(TEST_CARTS)
 clean ::
