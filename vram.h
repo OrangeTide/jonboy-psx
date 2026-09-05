@@ -20,5 +20,7 @@ typedef struct {
     uint8_t  is_transfer_active;
 } PSX_VRAM;
 
-PSX_VRAM vram;
+extern PSX_VRAM vram;
+
+void psx_gpu_write_pixel_payload(uint32_t two_pixels_word);
 #endif

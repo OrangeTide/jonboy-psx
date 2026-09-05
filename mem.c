@@ -1,12 +1,14 @@
+#include "cdrom.h"
+#include "cpu.h"
+#include "dma.h"
+#include "gpu.h"
 #include "mem.h"
 #include "mmio.h"
-#include "dma.h"
-#include "cpu.h"
 #include "pad.h"
 #include "psio.h"
 #include "spu.h"
-#include "cdrom.h"
 #include "timer.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,10 +86,10 @@ read_hardware_word(uint32_t physical_addr)
 
     // 3. DMA CONTROLLER (0x1F8010F0 - 0x1F8010F4)
     case 0x10F0:
-        return cpu.dma_control;
+        return dma_control;
 
     case 0x10F4:
-        return cpu.dma_interrupt;
+        return dma_interrupt;
 
     // 4. TIMERS (0x1F801100 - 0x1F801128)
     case 0x1100:

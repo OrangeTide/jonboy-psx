@@ -1,3 +1,6 @@
+#ifndef MEM_H_
+#define MEM_H_
+
 #include "rom.h"
 #include <stdint.h>
 
@@ -33,3 +36,4 @@ extern uint8_t system_ram[MEM_MAX_SIZE];
     system_ram[(addr) + 0] = (uint8_t)((val) & 0xFF);         \
     system_ram[(addr) + 1] = (uint8_t)(((val) >> 8) & 0xFF);  \
 } while(0)
+#endif

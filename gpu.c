@@ -157,6 +157,13 @@ psx_gpu_send_command_gp1(uint32_t value)
     }
 }
 
+// Returns data back to the CPU during a VRAM-to-CPU transfer. Default to safe NOP data.
+uint32_t
+psx_gpu_read_vram_or_gp0()
+{
+    return 0x00000000;
+}
+
 uint32_t
 psx_gpu_get_status()
 {

@@ -1,5 +1,7 @@
 #include "vram.h"
 
+PSX_VRAM vram;
+
 void
 psx_gpu_write_pixel_payload(uint32_t two_pixels_word)
 {

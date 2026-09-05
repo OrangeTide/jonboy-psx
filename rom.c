@@ -35,6 +35,7 @@ rom_load(const char *filename)
         }
     }
 
-    fclose(f);
+    if (f) fclose(f);
+
     return result;
 }

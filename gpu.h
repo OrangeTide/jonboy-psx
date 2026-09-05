@@ -16,4 +16,8 @@ typedef struct {
 
 extern PSX_GPU gpu;
 
+void psx_gpu_send_command_gp0(uint32_t value);
+void psx_gpu_send_command_gp1(uint32_t value);
+uint32_t psx_gpu_read_vram_or_gp0();
+uint32_t psx_gpu_get_status();
 #endif

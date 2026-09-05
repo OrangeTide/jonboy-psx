@@ -24,7 +24,12 @@ run_dma_transfer(int channel)
             // Loop through memory instantly and write hardware links
             for (uint32_t i = 0; i < words; i++) {
                 uint32_t next_pointer = (i == words - 1) ? 0x00FFFFFF : (addr - 4) & 0xFFFFFF;
-                MEM_WRITE_32(addr, next_pointer);
+
+                // Using direction condition logically (even though OTC is always to RAM)
+                if (direction == 0) {
+                    MEM_WRITE_32(addr, next_pointer);
+                }
+
                 addr -= 4; // OTC works backwards through memory addresses
             }
         }
@@ -35,13 +40,42 @@ run_dma_transfer(int channel)
     dma_channels[channel].chcr &= ~0x01000000;
 
     // 2. Set the completion flag inside the Global DMA Interrupt register
-    cpu.dma_interrupt |= (1 << (16 + channel));
+    dma_interrupt |= (1 << (16 + channel));
 
     // 3. Trigger the Master Hardware Interrupt if the channel's DMA interrupt mask is active
-    uint32_t master_dma_enable = (cpu.dma_interrupt >> 23) & 1;
-    uint32_t channel_mask      = (cpu.dma_interrupt >> (16 + channel)) & 1;
+    uint32_t master_dma_enable = (dma_interrupt >> 23) & 1;
+    uint32_t channel_mask      = (dma_interrupt >> (16 + channel)) & 1;
 
     if (master_dma_enable && channel_mask) {
         cpu.i_stat |= (1 << 3); // Bit 3 of I_STAT is explicitly reserved for DMA completion
+    }
+}
+
+void
+psx_dma_set_channel_base(int channel, uint32_t value)
+{
+    if (channel >= 0 && channel < 7) {
+        dma_channels[channel].madr = value;
+    }
+}
+
+void
+psx_dma_set_channel_block(int channel, uint32_t value)
+{
+    if (channel >= 0 && channel < 7) {
+        dma_channels[channel].bcr = value;
+    }
+}
+
+void
+psx_dma_trigger_channel(int channel, uint32_t value)
+{
+    if (channel >= 0 && channel < 7) {
+        dma_channels[channel].chcr = value;
+
+        // Bit 24 represents the instantaneous hardware trigger request flag
+        if ((value & 0x01000000) != 0) {
+            run_dma_transfer(channel);
+        }
     }
 }
