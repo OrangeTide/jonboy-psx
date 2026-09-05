@@ -58,49 +58,55 @@ void
 execute_completed_gp0_command(uint32_t opcode, uint32_t* buffer)
 {
     switch (opcode) {
+    case 0x02: { // Fill Rectangle in VRAM
+        // Word 0 carries a 24-bit RGB color; words 1 and 2 the position and
+        // size. Convert to 15-bit BGR555 and fill the rectangle.
+        uint32_t color24 = buffer[0] & 0xFFFFFF;
+        uint32_t r = (color24 >> 3) & 0x1F;
+        uint32_t g = (color24 >> 11) & 0x1F;
+        uint32_t b = (color24 >> 19) & 0x1F;
+        uint16_t px = (uint16_t)((b << 10) | (g << 5) | r);
+
+        uint32_t x = buffer[1] & 0xFFFF;
+        uint32_t y = (buffer[1] >> 16) & 0xFFFF;
+        uint32_t w = buffer[2] & 0xFFFF;
+        uint32_t h = (buffer[2] >> 16) & 0xFFFF;
+
+        for (uint32_t dy = 0; dy < h; dy++) {
+            for (uint32_t dx = 0; dx < w; dx++) {
+                vram.canvas[(x + dx) & (VRAM_WIDTH - 1)][(y + dy) & (VRAM_HEIGHT - 1)] = px;
+            }
+        }
+    }
+    break;
+
     case 0x20: // Draw Monochrome Triangle
         // Vertices are parsed out of buffer[1], buffer[2], buffer[3]
         // psx_rasterize_triangle(buffer);
         break;
 
-    case 0xA0: { // CPU to VRAM Block Transfer Setup
-        uint32_t width  = buffer[2] & 0xFFFF;
-        uint32_t height = (buffer[2] >> 16) & 0xFFFF;
-        uint32_t total_pixels = width * height;
-        // Scale remaining expected inputs for raw stream payload processing
-        uint32_t target_words = (total_pixels + 1) / 2;
+    case 0xA0: // Copy Rectangle (CPU to VRAM): set up the streaming transfer
+        // Word 1: destination (X in bottom 16 bits, Y in top 16 bits).
+        vram.transfer_start_x = buffer[1] & 0xFFFF;
+        vram.transfer_start_y = (buffer[1] >> 16) & 0xFFFF;
 
-        // Keep the engine open to consume subsequent payload blocks
-        gpu.current_packet_length += target_words;
-        return;
-    }
-    break;
+        // Word 2: dimensions (width in bottom 16 bits, height in top 16 bits).
+        vram.transfer_width  = buffer[2] & 0xFFFF;
+        vram.transfer_height = (buffer[2] >> 16) & 0xFFFF;
+
+        // Runtime streaming pointers, then flag that subsequent GP0 words are
+        // raw pixel payload rather than commands.
+        vram.transfer_current_x = vram.transfer_start_x;
+        vram.transfer_current_y = vram.transfer_start_y;
+        vram.is_transfer_active = 1;
+
+        gpu.fifo_words_count = 0;
+        gpu.current_packet_length = 0;
+        return; // stay open to consume the pixel stream
 
     case 0xE5: // Drawing Offset
         // Adjust internal canvas offsets for frame coordinate shifts
         break;
-
-    case 0x40: // Command 0xA0: CPU-to-VRAM Block Transfer Setup
-        // Parameter Word 1: Coordinates (X is bottom 16 bits, Y is top 16 bits)
-        vram.transfer_start_x   = buffer[1] & 0xFFFF;
-        vram.transfer_start_y   = (buffer[1] >> 16) & 0xFFFF;
-
-        // Parameter Word 2: Dimensions (Width is bottom 16 bits, Height is top 16 bits)
-        vram.transfer_width     = buffer[2] & 0xFFFF;
-        vram.transfer_height    = (buffer[2] >> 16) & 0xFFFF;
-
-        // Initialize our streaming runtime pointers
-        vram.transfer_current_x = vram.transfer_start_x;
-        vram.transfer_current_y = vram.transfer_start_y;
-
-        // Flag our system that subsequent GP0 words are raw pixel payloads
-        vram.is_transfer_active = 1;
-
-        // Clean out command buffers to cleanly receive data streams
-        gpu.fifo_words_count = 0;
-        gpu.current_packet_length = 0;
-        break;
-
     }
 
     // Clear buffer count to await the next standalone operation

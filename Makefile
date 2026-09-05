@@ -8,9 +8,21 @@ run : $(BINDIR)/jonboy
 	./$<
 fmt : # WARNING: this modifies every file without confirmation
 	astyle --style=linux -xB --indent=spaces=4 -f -p *.[ch]
+# Run the PeterLemon per-opcode CPU tests as a conformance suite. The reference
+# ROMs live under REF/ (not part of this repository) and each prints a PASS or
+# FAIL verdict read back from the framebuffer.
+CPUTESTS=$(sort $(wildcard REF/PSX/CPUTest/CPU/*/*.exe REF/PSX/CPUTest/CPU/*/*/*.exe))
+conformance : $(BINDIR)/jonboy
+	@pass=0; fail=0; \
+	for exe in $(CPUTESTS); do \
+	    v=$$(./$(BINDIR)/jonboy --exe "$$exe" 2>/dev/null | grep VERDICT | awk '{print $$2}'); \
+	    printf "%-14s %s\n" "$$(basename $$exe .exe)" "$$v"; \
+	    if [ "$$v" = PASS ]; then pass=$$((pass+1)); else fail=$$((fail+1)); fi; \
+	done; \
+	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt
+.PHONY: all clean clean-all run fmt conformance
 ## jonboy
 all :: $(BINDIR)/jonboy
 clean ::

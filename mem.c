@@ -9,6 +9,7 @@
 #include "spu.h"
 #include "timer.h"
 #include <stdio.h>
+#include <string.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -137,6 +138,64 @@ void
 memory_write_byte(uint32_t v_addr, uint32_t value)
 {
     mem_write(v_addr, value, 1);
+}
+
+// Little-endian 32-bit read from a byte buffer.
+static uint32_t
+rd32(const uint8_t *b, int off)
+{
+    return (uint32_t)b[off] | ((uint32_t)b[off + 1] << 8)
+           | ((uint32_t)b[off + 2] << 16) | ((uint32_t)b[off + 3] << 24);
+}
+
+int
+mem_load_exe(const char *filename, uint32_t *out_pc, uint32_t *out_gp, uint32_t *out_sp)
+{
+    FILE *f = fopen(filename, "rb");
+
+    if (!f) {
+        perror(filename);
+        return -1;
+    }
+
+    // The 2 KB PS-EXE header carries the entry PC, GP, load address/size, and
+    // the initial stack pointer. The program image follows it.
+    uint8_t hdr[0x800];
+
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || memcmp(hdr, "PS-X EXE", 8) != 0) {
+        fprintf(stderr, "%s: not a PS-EXE\n", filename);
+        fclose(f);
+        return -1;
+    }
+
+    uint32_t pc     = rd32(hdr, 0x10);
+    uint32_t gp     = rd32(hdr, 0x14);
+    uint32_t t_addr = rd32(hdr, 0x18);
+    uint32_t t_size = rd32(hdr, 0x1C);
+    uint32_t s_addr = rd32(hdr, 0x30);
+    uint32_t s_size = rd32(hdr, 0x34);
+
+    uint32_t phys = TO_PHYSICAL(t_addr);
+
+    if ((uint64_t)phys + t_size > RAM_SIZE) {
+        fprintf(stderr, "%s: image does not fit in RAM (addr 0x%08X size 0x%X)\n",
+                filename, t_addr, t_size);
+        fclose(f);
+        return -1;
+    }
+
+    size_t readlen = fread(system_ram + phys, 1, t_size, f);
+    fclose(f);
+
+    if (readlen != t_size) {
+        fprintf(stderr, "%s: short read (%zu of %u bytes)\n", filename, readlen, t_size);
+        return -1;
+    }
+
+    *out_pc = pc;
+    *out_gp = gp;
+    *out_sp = s_addr ? (s_addr + s_size) : 0x801FFF00;
+    return 0;
 }
 
 int

@@ -63,4 +63,8 @@ int mem_load_file(const char *filename, uint32_t phys_addr);
 
 // Load a BIOS image into the mapped BIOS region. Returns 0 on success.
 int mem_load_bios(const char *filename);
+
+// Load a PS-EXE: parse the header, copy the image into RAM, and return the
+// entry PC, initial GP, and initial SP. Returns 0 on success.
+int mem_load_exe(const char *filename, uint32_t *out_pc, uint32_t *out_gp, uint32_t *out_sp);
 #endif

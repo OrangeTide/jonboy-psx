@@ -256,6 +256,120 @@ run_headless(const char *path, uint32_t load_addr, uint32_t start_pc, uint64_t m
     return 0;
 }
 
+// ============================================================================
+// PS-EXE CONFORMANCE RUNNER (Milestone 2)
+// ============================================================================
+// Loads a PlayStation executable and runs it headless. The PeterLemon CPU
+// tests draw a green "PASS" or red "FAIL" glyph per subtest into VRAM, so the
+// verdict is read back by sampling the colors in the result column.
+
+// Convert one BGR555 VRAM pixel into 8-bit R, G, B components.
+static void
+bgr555_to_rgb(uint16_t px, int *r, int *g, int *b)
+{
+    int r5 = px & 0x1F;
+    int g5 = (px >> 5) & 0x1F;
+    int b5 = (px >> 10) & 0x1F;
+    *r = (r5 << 3) | (r5 >> 2);
+    *g = (g5 << 3) | (g5 >> 2);
+    *b = (b5 << 3) | (b5 >> 2);
+}
+
+// Dump the visible 320x240 top-left region of VRAM as a binary PPM.
+static void
+dump_vram_ppm(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+
+    if (!f) {
+        perror(path);
+        return;
+    }
+
+    int w = 320, h = 240;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int r, g, b;
+            bgr555_to_rgb(vram.canvas[x][y], &r, &g, &b);
+            unsigned char rgb[3] = { (unsigned char)r, (unsigned char)g, (unsigned char)b };
+            fwrite(rgb, 1, 3, f);
+        }
+    }
+
+    fclose(f);
+    printf("Wrote VRAM image to %s\n", path);
+}
+
+// Count green (PASS) and red (FAIL) glyph pixels in the result column of the
+// PeterLemon CPU tests (x in [280,320), below the header row).
+static void
+classify_results(int *out_green, int *out_red)
+{
+    int green = 0, red = 0;
+
+    for (int y = 24; y < 240; y++) {
+        for (int x = 280; x < 320; x++) {
+            int r, g, b;
+            bgr555_to_rgb(vram.canvas[x][y], &r, &g, &b);
+
+            if (g > r + 32 && g > b + 32) {
+                green++;
+            } else if (r > g + 32 && r > b + 32) {
+                red++;
+            }
+        }
+    }
+
+    *out_green = green;
+    *out_red = red;
+}
+
+static int
+run_exe(const char *path, uint64_t max_steps, const char *vram_out)
+{
+    uint32_t pc, gp, sp;
+
+    if (mem_load_exe(path, &pc, &gp, &sp) != 0) {
+        return 1;
+    }
+
+    cpu_reset(pc);
+    cpu.regs[28] = gp; // $gp
+    cpu.regs[29] = sp; // $sp
+    cpu.regs[30] = sp; // $fp
+    cpu.halt_on_break = 1;
+
+    printf("Running %s: PC=0x%08X GP=0x%08X SP=0x%08X, step limit %llu\n",
+           path, pc, gp, sp, (unsigned long long)max_steps);
+
+    uint64_t steps = 0;
+
+    while (!cpu.halted && steps < max_steps) {
+        step_cpu();
+        steps++;
+    }
+
+    printf("Ran %llu steps (PC=0x%08X).\n", (unsigned long long)steps, cpu.PC);
+
+    int green = 0, red = 0;
+    classify_results(&green, &red);
+    printf("Result column: %d green (PASS) pixels, %d red (FAIL) pixels\n", green, red);
+
+    if (vram_out) {
+        dump_vram_ppm(vram_out);
+    }
+
+    if (green > 0 && red == 0) {
+        printf("VERDICT: PASS\n");
+        return 0;
+    }
+
+    printf("VERDICT: FAIL\n");
+    return 2;
+}
+
 static void
 print_usage(const char *prog)
 {
@@ -263,25 +377,34 @@ print_usage(const char *prog)
             "Usage:\n"
             "  %s                              run the SDL windowed emulator\n"
             "  %s --headless <file> [opts]     run a flat binary with no window\n"
+            "  %s --exe <file.exe> [opts]      run a PS-EXE headless (conformance)\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
             "  --pc <hex>          entry PC (default = load address)\n"
-            "  --steps <n>         max instructions to run (default 1000000)\n",
-            prog, prog);
+            "  --steps <n>         max instructions to run\n"
+            "  --vram-out <file>   write the 320x240 VRAM region as a PPM image\n",
+            prog, prog, prog);
 }
 
 int
 main(int argc, char *argv[])
 {
     const char *headless_file = NULL;
+    const char *exe_file = NULL;
+    const char *vram_out = NULL;
     uint32_t load_addr = 0;
     uint32_t start_pc = 0;
     int have_pc = 0;
+    int have_steps = 0;
     uint64_t max_steps = 1000000;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--headless") == 0 && i + 1 < argc) {
             headless_file = argv[++i];
+        } else if (strcmp(argv[i], "--exe") == 0 && i + 1 < argc) {
+            exe_file = argv[++i];
+        } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
+            vram_out = argv[++i];
         } else if (strcmp(argv[i], "--load-addr") == 0 && i + 1 < argc) {
             load_addr = (uint32_t)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--pc") == 0 && i + 1 < argc) {
@@ -289,10 +412,16 @@ main(int argc, char *argv[])
             have_pc = 1;
         } else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) {
             max_steps = strtoull(argv[++i], NULL, 0);
+            have_steps = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
         }
+    }
+
+    if (exe_file) {
+        // These tests draw once then spin, so run a generous budget by default.
+        return run_exe(exe_file, have_steps ? max_steps : 20000000, vram_out);
     }
 
     if (headless_file) {
