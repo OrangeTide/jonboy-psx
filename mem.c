@@ -406,18 +406,8 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
         psx_gpu_send_command_gp1(value);
         break;
 
-    // DMA Channels (Example: GPU DMA, CDROM DMA)
-    case 0x10A8:
-        psx_dma_set_channel_base(0, value);
-        break;
-
-    case 0x10AC:
-        psx_dma_set_channel_block(0, value);
-        break;
-
-    case 0x10B0:
-        psx_dma_trigger_channel(0, value);
-        break;
+    // DMA per-channel registers (0x1080-0x10E8) are handled by the generic
+    // decoder block above, which also triggers a transfer on the start bit.
 
     default:
         // printf("Unhandled MMIO Word Write: 0x%08X = 0x%08X\n", physical_addr, value);

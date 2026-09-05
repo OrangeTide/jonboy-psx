@@ -245,8 +245,11 @@ dump_memory(uint32_t addr, uint32_t words)
     }
 }
 
+static void dump_vram_ppm(const char *path); // defined below
+
 static int
-run_headless(const char *path, uint32_t load_addr, uint32_t start_pc, uint64_t max_steps)
+run_headless(const char *path, uint32_t load_addr, uint32_t start_pc,
+             uint64_t max_steps, const char *vram_out)
 {
     if (mem_load_file(path, load_addr) != 0) {
         fprintf(stderr, "headless: failed to load %s\n", path);
@@ -275,6 +278,10 @@ run_headless(const char *path, uint32_t load_addr, uint32_t start_pc, uint64_t m
 
     dump_registers();
     dump_memory(load_addr, 16);
+
+    if (vram_out) {
+        dump_vram_ppm(vram_out);
+    }
 
     return 0;
 }
@@ -511,7 +518,7 @@ main(int argc, char *argv[])
             start_pc = load_addr;
         }
 
-        return run_headless(headless_file, load_addr, start_pc, max_steps);
+        return run_headless(headless_file, load_addr, start_pc, max_steps, vram_out);
     }
 
     return SDL_RunApp(argc, argv, jonboy_runapp, NULL);

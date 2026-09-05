@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "dma.h"
+#include "gpu.h"
 #include "mem.h"
 #include "psio.h"
 #include <string.h>
@@ -76,6 +77,74 @@ dma_psio_read(int channel)
     psio.status_reg &= ~0x01u; // clear BUSY
 }
 
+// Walk a GPU command linked list (SyncMode 2). Each node is a header word whose
+// top 8 bits give the word count and whose low 24 bits point at the next node;
+// the words after the header are GP0 commands. The list ends when the header's
+// bit 23 is set (0xFFFFFF is the usual terminator).
+static void
+dma_gpu_linked_list(uint32_t addr)
+{
+    // Bound the walk so a malformed list cannot loop forever.
+    for (int guard = 0; guard < 0x100000; guard++) {
+        uint32_t header = MEM_READ_32(addr & RAM_MASK);
+        uint32_t count = header >> 24;
+
+        for (uint32_t i = 0; i < count; i++) {
+            addr = (addr + 4) & RAM_MASK;
+            psx_gpu_send_command_gp0(MEM_READ_32(addr));
+        }
+
+        if (header & 0x800000) {
+            break; // end-of-list marker
+        }
+
+        addr = header & 0x1FFFFC; // next node, word-aligned and masked to RAM
+    }
+}
+
+// Transfer a fixed number of words between RAM and the GPU (SyncMode 0/1).
+// from_ram sends GP0 commands; otherwise VRAM data is read back into RAM.
+static void
+dma_gpu_block(uint32_t addr, uint32_t words, int from_ram, int decrement)
+{
+    int step = decrement ? -4 : 4;
+
+    for (uint32_t i = 0; i < words; i++) {
+        addr &= RAM_MASK;
+
+        if (from_ram) {
+            psx_gpu_send_command_gp0(MEM_READ_32(addr));
+        } else {
+            MEM_WRITE_32(addr, psx_gpu_read_vram_or_gp0());
+        }
+
+        addr += (uint32_t)step;
+    }
+}
+
+// GPU DMA (channel 2): linked-list command lists or block transfers.
+static void
+dma_gpu(int channel)
+{
+    uint32_t chcr = dma_channels[channel].chcr;
+    uint32_t bcr  = dma_channels[channel].bcr;
+    uint32_t madr = dma_channels[channel].madr;
+    uint32_t sync = (chcr >> 9) & 3;
+    int from_ram  = chcr & 1;
+    int decrement = (chcr >> 1) & 1;
+
+    if (sync == 2) {
+        dma_gpu_linked_list(madr);
+    } else if (sync == 1) {
+        // Block mode: BCR is block size (low 16) times block count (high 16).
+        uint32_t words = (bcr & 0xFFFF) * ((bcr >> 16) & 0xFFFF);
+        dma_gpu_block(madr, words, from_ram, decrement);
+    } else {
+        // Immediate mode: BCR low 16 bits is the word count.
+        dma_gpu_block(madr, bcr & 0xFFFF, from_ram, decrement);
+    }
+}
+
 // Shared completion path: clear the channel's start bit and, if the channel's
 // DMA interrupt is enabled, raise its flag and signal the CPU.
 static void
@@ -99,6 +168,10 @@ void
 run_dma_transfer(int channel)
 {
     switch (channel) {
+    case 2: // GPU command lists / VRAM transfers
+        dma_gpu(channel);
+        break;
+
     case 3: // CD-ROM slot, driven by the PSIO cartridge
         dma_psio_read(channel);
         break;
@@ -115,33 +188,4 @@ run_dma_transfer(int channel)
     }
 
     dma_finish(channel);
-}
-
-void
-psx_dma_set_channel_base(int channel, uint32_t value)
-{
-    if (channel >= 0 && channel < 7) {
-        dma_channels[channel].madr = value;
-    }
-}
-
-void
-psx_dma_set_channel_block(int channel, uint32_t value)
-{
-    if (channel >= 0 && channel < 7) {
-        dma_channels[channel].bcr = value;
-    }
-}
-
-void
-psx_dma_trigger_channel(int channel, uint32_t value)
-{
-    if (channel >= 0 && channel < 7) {
-        dma_channels[channel].chcr = value;
-
-        // Bit 24 represents the instantaneous hardware trigger request flag
-        if ((value & 0x01000000) != 0) {
-            run_dma_transfer(channel);
-        }
-    }
 }
