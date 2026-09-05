@@ -15,45 +15,149 @@
 #include <string.h>
 
 uint8_t system_ram[MEM_MAX_SIZE];
+uint8_t bios_rom[BIOS_SIZE];
+uint8_t scratchpad[SCRATCH_SIZE];
 
 uint32_t read_hardware_word(uint32_t physical_addr);
 void write_hardware_word(uint32_t physical_addr, uint32_t value);
 
-uint32_t
-memory_read_word(uint32_t v_addr)
+// Little-endian read/write of a 1, 2, or 4 byte value inside a backing array.
+// The caller has already range-checked that off + size fits.
+static uint32_t
+load_sized(const uint8_t *base, uint32_t off, int size)
 {
-    uint32_t p_addr = TO_PHYSICAL(v_addr);
+    uint32_t v = 0;
 
-    // Check if the address hits the PlayStation MMIO block
-    if (p_addr >= MMIO_BASE && p_addr < (MMIO_BASE + MMIO_LENGTH)) {
-        return read_hardware_word(p_addr);
+    for (int i = 0; i < size; i++) {
+        v |= (uint32_t)base[off + i] << (i * 8);
     }
 
-    // Fallback to standard RAM fetch macro. Guard against out-of-range
-    // physical addresses. Full region decoding (RAM mirroring, BIOS,
-    // scratchpad) is a later milestone; for now anything outside the backing
-    // array reads as zero instead of running off the end of it.
-    if ((uint64_t)p_addr + 3 < MEM_MAX_SIZE) {
-        return MEM_READ_32(p_addr);
+    return v;
+}
+
+static void
+store_sized(uint8_t *base, uint32_t off, uint32_t value, int size)
+{
+    for (int i = 0; i < size; i++) {
+        base[off + i] = (uint8_t)(value >> (i * 8));
+    }
+}
+
+// Decode a physical address to its region and read a sized value. Sub-word
+// reads of MMIO extract the requested bytes from the containing word.
+static uint32_t
+mem_read(uint32_t v_addr, int size)
+{
+    uint32_t a = TO_PHYSICAL(v_addr);
+
+    if (a < RAM_END) {
+        return load_sized(system_ram, a & RAM_MASK, size);
+    }
+
+    if (a >= BIOS_BASE && a + (uint32_t)size <= BIOS_BASE + BIOS_SIZE) {
+        return load_sized(bios_rom, a - BIOS_BASE, size);
+    }
+
+    if (a >= SCRATCH_BASE && a + (uint32_t)size <= SCRATCH_BASE + SCRATCH_SIZE) {
+        return load_sized(scratchpad, a - SCRATCH_BASE, size);
+    }
+
+    if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
+        uint32_t word = read_hardware_word(a & ~3u);
+
+        if (size == 4) {
+            return word;
+        }
+
+        uint32_t shift = (a & 3) * 8;
+        uint32_t mask = (size == 1) ? 0xFF : 0xFFFF;
+        return (word >> shift) & mask;
     }
 
     return 0;
 }
 
-void
-memory_write_word(uint32_t v_addr, uint32_t value)
+// Decode a physical address to its region and write a sized value. Sub-word
+// MMIO writes are approximated for now; the CPU-facing sub-word registers used
+// so far take full words.
+static void
+mem_write(uint32_t v_addr, uint32_t value, int size)
 {
-    uint32_t p_addr = TO_PHYSICAL(v_addr);
+    uint32_t a = TO_PHYSICAL(v_addr);
 
-    if (p_addr >= MMIO_BASE && p_addr < (MMIO_BASE + MMIO_LENGTH)) {
-        write_hardware_word(p_addr, value);
+    if (a < RAM_END) {
+        store_sized(system_ram, a & RAM_MASK, value, size);
         return;
     }
 
-    // Guard against out-of-range writes for the same reason as the read path.
-    if ((uint64_t)p_addr + 3 < MEM_MAX_SIZE) {
-        MEM_WRITE_32(p_addr, value);
+    if (a >= SCRATCH_BASE && a + (uint32_t)size <= SCRATCH_BASE + SCRATCH_SIZE) {
+        store_sized(scratchpad, a - SCRATCH_BASE, value, size);
+        return;
     }
+
+    if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
+        write_hardware_word(a & ~3u, value);
+        return;
+    }
+
+    // BIOS is read-only; anything else is unmapped. Ignore.
+}
+
+uint32_t
+memory_read_word(uint32_t v_addr)
+{
+    return mem_read(v_addr, 4);
+}
+
+uint32_t
+memory_read_halfword(uint32_t v_addr)
+{
+    return mem_read(v_addr, 2);
+}
+
+uint32_t
+memory_read_byte(uint32_t v_addr)
+{
+    return mem_read(v_addr, 1);
+}
+
+void
+memory_write_word(uint32_t v_addr, uint32_t value)
+{
+    mem_write(v_addr, value, 4);
+}
+
+void
+memory_write_halfword(uint32_t v_addr, uint32_t value)
+{
+    mem_write(v_addr, value, 2);
+}
+
+void
+memory_write_byte(uint32_t v_addr, uint32_t value)
+{
+    mem_write(v_addr, value, 1);
+}
+
+int
+mem_load_bios(const char *filename)
+{
+    FILE *f = fopen(filename, "rb");
+
+    if (!f) {
+        perror(filename);
+        return -1;
+    }
+
+    size_t readlen = fread(bios_rom, 1, BIOS_SIZE, f);
+    fclose(f);
+
+    if (readlen == 0) {
+        fprintf(stderr, "%s: empty or unreadable BIOS\n", filename);
+        return -1;
+    }
+
+    return 0;
 }
 
 int

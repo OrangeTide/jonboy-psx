@@ -1,6 +1,11 @@
 .text
 .global __start
 
+# Emit instructions exactly as written. Without this, the assembler fills and
+# reorders branch and load delay slots, which silently rewrites the delay-slot
+# tests below (tests 5 and 6) and makes them meaningless.
+.set noreorder
+
 __start:
     # -------------------------------------------------------------------------
     # TEST 1: Basic Register Operations & Immediate Arithmetic (ADDIU, ORI)
@@ -77,6 +82,7 @@ target_branch:
     sw   $t1, 0($t0)    # Store it to memory
 
     # The Core Load Delay Test:
+    li   $t2, 0        # Known old value so the delay-slot read is deterministic
     lw   $t2, 0($t0)    # Load value into $t2
     add  $t3, $t2, $zero # CRITICAL: This instruction executes BEFORE $t2 updates!
                         # Therefore, $t3 should get the OLD value of $t2 (0).

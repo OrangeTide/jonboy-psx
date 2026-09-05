@@ -4,7 +4,17 @@
 #include "rom.h"
 #include <stdint.h>
 
-#define MEM_MAX_SIZE (4096 * 1024)
+// PlayStation memory regions (physical addresses after segment stripping).
+#define RAM_SIZE     (2 * 1024 * 1024) // 2 MB main RAM, mirrored across 0x00000000-0x007FFFFF
+#define RAM_MASK     (RAM_SIZE - 1)
+#define RAM_END      0x00800000        // end of the mirrored RAM window
+#define SCRATCH_BASE 0x1F800000        // 1 KB scratchpad (D-cache used as fast RAM)
+#define SCRATCH_SIZE 0x00000400
+#define BIOS_BASE    0x1FC00000        // 512 KB BIOS ROM
+#define BIOS_SIZE    0x00080000
+
+// Backwards-compatible alias: the flat-load harness uses this as the RAM bound.
+#define MEM_MAX_SIZE RAM_SIZE
 extern uint8_t system_ram[MEM_MAX_SIZE];
 
 // 1. Fetch a 32-bit Word (Little-Endian)
@@ -39,11 +49,18 @@ extern uint8_t system_ram[MEM_MAX_SIZE];
 
 // Address-translating, MMIO-aware accessors. The CPU must go through these,
 // never the raw macros above, so that virtual addresses are converted to
-// physical and hardware registers are dispatched.
+// physical, the region is decoded, and hardware registers are dispatched.
 uint32_t memory_read_word(uint32_t v_addr);
+uint32_t memory_read_halfword(uint32_t v_addr);
+uint32_t memory_read_byte(uint32_t v_addr);
 void memory_write_word(uint32_t v_addr, uint32_t value);
+void memory_write_halfword(uint32_t v_addr, uint32_t value);
+void memory_write_byte(uint32_t v_addr, uint32_t value);
 
 // Load a flat binary file straight into system RAM at a physical address.
 // Returns 0 on success, negative on error.
 int mem_load_file(const char *filename, uint32_t phys_addr);
+
+// Load a BIOS image into the mapped BIOS region. Returns 0 on success.
+int mem_load_bios(const char *filename);
 #endif

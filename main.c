@@ -97,16 +97,17 @@ jonboy_runapp(int argc, char *argv[])
         return 1;
     }
 
-    // 3. Load the software ROM/BIOS image binary into your virtual memory array
-    // rom_load returns 0 on success. A missing BIOS is not fatal during
-    // development: the window still opens, it just shows a blank framebuffer.
-    if (rom_load("bios.bin") == 0) {
-        printf("ROM BIOS loaded.\n");
+    // 3. Load the BIOS image into the mapped BIOS region (0x1FC00000).
+    // A missing BIOS is not fatal during development: the window still opens,
+    // the CPU just runs zeroed ROM.
+    if (mem_load_bios("bios.bin") == 0) {
+        printf("BIOS loaded.\n");
     } else {
-        printf("No BIOS loaded, continuing with blank RAM.\n");
+        printf("No BIOS loaded, continuing with blank ROM.\n");
     }
 
-    cpu_reset(0);
+    // Start execution at the CPU reset vector (BIOS entry point).
+    cpu_reset(0xBFC00000);
 
     // Timing tracking variables using SDL3's high-resolution performance counters
     uint64_t last_time = SDL_GetPerformanceCounter();

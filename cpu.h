@@ -1,9 +1,6 @@
 #ifndef CPU_H_
 #define CPU_H_
 #include <stdint.h>
-#define DELAY_STATE_NONE       0
-#define DELAY_STATE_DELAY_SLOT 1
-#define DELAY_STATE_JUMPING    2
 
 // ============================================================================
 // MIPS-I STATUS REGISTER (SR / CP0 REG 12) BITMASKS
@@ -68,11 +65,24 @@ enum {
 
 typedef struct {
     uint32_t regs[32];
-    uint32_t PC;
 
-    // Branch delay tracking variables
-    uint8_t  delay_slot_state;
-    uint32_t branch_target;
+    // Multiply / divide result registers.
+    uint32_t hi;
+    uint32_t lo;
+
+    // Program counter model. PC is the instruction about to run; next_pc is the
+    // instruction after it. A taken branch overwrites next_pc, which leaves the
+    // instruction already sitting at PC to run as the branch delay slot. This
+    // two-register form handles delay slots without a separate state machine.
+    uint32_t PC;
+    uint32_t next_pc;
+    uint32_t current_pc; // PC of the instruction currently executing (for EPC)
+
+    // Branch tracking. branch_taken is set when the current instruction takes a
+    // branch; in_delay_slot records that the previous instruction did, so the
+    // current one occupies a delay slot (needed for exception reporting).
+    uint8_t  branch_taken;
+    uint8_t  in_delay_slot;
 
     // Load delay variables
     uint32_t load_reg;   // The register slated to be updated (0 if none)

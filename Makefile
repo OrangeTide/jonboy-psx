@@ -29,6 +29,6 @@ $(BINDIR)/test1.cart : $(BINDIR)/test1.elf
 $(BINDIR)/test1.o : test1.asm
 	mipsel-unknown-elf-as -march=r3000 -mabi=32 -o $@ $<
 $(BINDIR)/test1.elf : $(BINDIR)/test1.o
-	mipsel-unknown-elf-ld -Ttext 0x0 -o $@ $<
+	mipsel-unknown-elf-ld -Ttext 0x0 -e __start -o $@ $<
 ## end
 -include $(wildcard *.d)

@@ -14,49 +14,101 @@ cpu_reset(uint32_t start_pc)
     R3051_CPU fresh = { 0 };
     cpu = fresh;
     cpu.PC = start_pc;
+    cpu.next_pc = start_pc + 4;
+}
+
+// Schedule a branch. At execute time cpu.PC already points at the delay-slot
+// instruction, so the target overwrites next_pc while the delay slot still
+// runs. branch_taken flags that the following instruction is a delay slot.
+static void
+do_branch(uint32_t target)
+{
+    cpu.next_pc = target;
+    cpu.branch_taken = 1;
+}
+
+// Stores are suppressed while the cache is isolated (SR bit 16). The BIOS sets
+// this during cache init and expects writes to stay out of main RAM.
+static int
+cache_isolated(void)
+{
+    return (cpu.cp0_regs[CP0_REG_SR] & SR_Isc) != 0;
 }
 
 void
 step_cpu(void)
 {
-    // ---- 1. FETCH & DECODE ----
+    // ---- FETCH ----
     // Fetch through the translating accessor so the virtual PC is mapped to a
     // physical address. Never index system_ram[] directly here.
-    uint32_t inst = memory_read_word(cpu.PC); // Fetch
-    uint32_t opcode = GET_OPCODE(inst);
-    uint32_t rs     = GET_RS(inst);
-    uint32_t rt     = GET_RT(inst);
-    int32_t  imm    = SIGN_EXTEND_16(GET_IMM16(inst));
+    cpu.current_pc = cpu.PC;
+    uint32_t inst = memory_read_word(cpu.PC);
 
-    // ---- 2. CAPTURE & RE-SET PENDING LOADS ----
-    // We cache what needs to be written back from the LAST cycle.
-    // This allows the current instruction to read the OLD register contents.
-    uint32_t delayed_write_reg = cpu.load_reg;
-    uint32_t delayed_write_val = cpu.load_val;
+    // ---- ADVANCE PC (delay-slot aware) ----
+    // The instruction just fetched runs now. cpu.PC moves to the slot a branch
+    // would fill; a taken branch overwrites cpu.next_pc during execute.
+    cpu.PC = cpu.next_pc;
+    cpu.next_pc += 4;
 
-    // Reset current cycle's load slot tracking
+    // This instruction is in a delay slot if the previous one branched.
+    cpu.in_delay_slot = cpu.branch_taken;
+    cpu.branch_taken = 0;
+
+    // ---- CAPTURE PENDING LOAD ----
+    // A load started last cycle becomes visible now, after this instruction has
+    // had the chance to read the register's OLD value. Reset the slot before
+    // executing so a load in THIS instruction registers cleanly.
+    uint32_t delayed_reg = cpu.load_reg;
+    uint32_t delayed_val = cpu.load_val;
     cpu.load_reg = 0;
     cpu.load_val = 0;
 
-    // Branch delay initialization step...
-    if (cpu.delay_slot_state == DELAY_STATE_JUMPING) {
-        cpu.delay_slot_state = DELAY_STATE_DELAY_SLOT;
-    }
+    // ---- DECODE ----
+    uint32_t opcode = GET_OPCODE(inst);
+    uint32_t rs     = GET_RS(inst);
+    uint32_t rt     = GET_RT(inst);
+    uint32_t rd     = GET_RD(inst);
+    uint32_t shamt  = GET_SHAMT(inst);
+    uint32_t funct  = GET_FUNCT(inst);
+    int32_t  imm_se = SIGN_EXTEND_16(GET_IMM16(inst)); // sign-extended immediate
+    uint32_t imm_ze = GET_IMM16(inst);                 // zero-extended immediate
 
-    // ---- 2. MANAGE DELAY SLOT STATE (START OF CYCLE) ----
-    // If we were flagged as "JUMPING" last cycle, we are now actively IN the delay slot.
-    if (cpu.delay_slot_state == DELAY_STATE_JUMPING) {
-        cpu.delay_slot_state = DELAY_STATE_DELAY_SLOT;
-    }
-
-    // ---- 3. EXECUTE CURRENT INSTRUCTION ----
     switch (opcode) {
-    case 0x00: { // SPECIAL: register-register ALU ops selected by the funct field.
-        // Only the halt traps are decoded here for now. The rest of the SPECIAL
-        // group (ADD, OR, SLL, JR, MULT, ...) arrives in Milestone 1.
-        uint32_t funct = GET_FUNCT(inst);
-
+    case 0x00: // SPECIAL: register/register operations selected by funct
         switch (funct) {
+        case 0x00: // SLL
+            cpu.regs[rd] = cpu.regs[rt] << shamt;
+            break;
+
+        case 0x02: // SRL (logical)
+            cpu.regs[rd] = cpu.regs[rt] >> shamt;
+            break;
+
+        case 0x03: // SRA (arithmetic)
+            cpu.regs[rd] = (uint32_t)((int32_t)cpu.regs[rt] >> shamt);
+            break;
+
+        case 0x04: // SLLV
+            cpu.regs[rd] = cpu.regs[rt] << (cpu.regs[rs] & 0x1F);
+            break;
+
+        case 0x06: // SRLV
+            cpu.regs[rd] = cpu.regs[rt] >> (cpu.regs[rs] & 0x1F);
+            break;
+
+        case 0x07: // SRAV
+            cpu.regs[rd] = (uint32_t)((int32_t)cpu.regs[rt] >> (cpu.regs[rs] & 0x1F));
+            break;
+
+        case 0x08: // JR
+            do_branch(cpu.regs[rs]);
+            break;
+
+        case 0x09: // JALR
+            cpu.regs[rd] = cpu.PC + 4; // return address = instruction after the slot
+            do_branch(cpu.regs[rs]);
+            break;
+
         case 0x0C: // SYSCALL
         case 0x0D: // BREAK
             // Both raise exceptions on real hardware. For the test harness we
@@ -64,132 +116,394 @@ step_cpu(void)
             cpu.halted = 1;
             break;
 
+        case 0x10: // MFHI
+            cpu.regs[rd] = cpu.hi;
+            break;
+
+        case 0x11: // MTHI
+            cpu.hi = cpu.regs[rs];
+            break;
+
+        case 0x12: // MFLO
+            cpu.regs[rd] = cpu.lo;
+            break;
+
+        case 0x13: // MTLO
+            cpu.lo = cpu.regs[rs];
+            break;
+
+        case 0x18: { // MULT (signed)
+            int64_t product = (int64_t)(int32_t)cpu.regs[rs] * (int64_t)(int32_t)cpu.regs[rt];
+            cpu.lo = (uint32_t)product;
+            cpu.hi = (uint32_t)((uint64_t)product >> 32);
+        }
+        break;
+
+        case 0x19: { // MULTU (unsigned)
+            uint64_t product = (uint64_t)cpu.regs[rs] * (uint64_t)cpu.regs[rt];
+            cpu.lo = (uint32_t)product;
+            cpu.hi = (uint32_t)(product >> 32);
+        }
+        break;
+
+        case 0x1A: { // DIV (signed) with MIPS-defined edge cases
+            int32_t n = (int32_t)cpu.regs[rs];
+            int32_t d = (int32_t)cpu.regs[rt];
+
+            if (d == 0) {
+                cpu.lo = (n >= 0) ? 0xFFFFFFFF : 0x00000001;
+                cpu.hi = (uint32_t)n;
+            } else if ((uint32_t)n == 0x80000000 && d == -1) {
+                cpu.lo = 0x80000000;
+                cpu.hi = 0;
+            } else {
+                cpu.lo = (uint32_t)(n / d);
+                cpu.hi = (uint32_t)(n % d);
+            }
+        }
+        break;
+
+        case 0x1B: { // DIVU (unsigned)
+            uint32_t n = cpu.regs[rs];
+            uint32_t d = cpu.regs[rt];
+
+            if (d == 0) {
+                cpu.lo = 0xFFFFFFFF;
+                cpu.hi = n;
+            } else {
+                cpu.lo = n / d;
+                cpu.hi = n % d;
+            }
+        }
+        break;
+
+        case 0x20: // ADD (overflow trap not yet raised, treated as ADDU)
+        case 0x21: // ADDU
+            cpu.regs[rd] = cpu.regs[rs] + cpu.regs[rt];
+            break;
+
+        case 0x22: // SUB (overflow trap not yet raised, treated as SUBU)
+        case 0x23: // SUBU
+            cpu.regs[rd] = cpu.regs[rs] - cpu.regs[rt];
+            break;
+
+        case 0x24: // AND
+            cpu.regs[rd] = cpu.regs[rs] & cpu.regs[rt];
+            break;
+
+        case 0x25: // OR
+            cpu.regs[rd] = cpu.regs[rs] | cpu.regs[rt];
+            break;
+
+        case 0x26: // XOR
+            cpu.regs[rd] = cpu.regs[rs] ^ cpu.regs[rt];
+            break;
+
+        case 0x27: // NOR
+            cpu.regs[rd] = ~(cpu.regs[rs] | cpu.regs[rt]);
+            break;
+
+        case 0x2A: // SLT (signed)
+            cpu.regs[rd] = ((int32_t)cpu.regs[rs] < (int32_t)cpu.regs[rt]) ? 1 : 0;
+            break;
+
+        case 0x2B: // SLTU (unsigned)
+            cpu.regs[rd] = (cpu.regs[rs] < cpu.regs[rt]) ? 1 : 0;
+            break;
+
         default:
             // Unimplemented SPECIAL function: no-op for now.
             break;
         }
+
+        break;
+
+    case 0x01: { // REGIMM: the rt field selects the branch variant
+        int32_t  value = (int32_t)cpu.regs[rs];
+        int      is_ge = rt & 0x01;         // 0 = less-than-zero, 1 = greater/equal-zero
+        int      link  = (rt & 0x1E) == 0x10; // BLTZAL / BGEZAL also write $ra
+
+        if (link) {
+            cpu.regs[31] = cpu.PC + 4; // link happens whether or not the branch is taken
+        }
+
+        int take = is_ge ? (value >= 0) : (value < 0);
+
+        if (take) {
+            do_branch(cpu.PC + (imm_se << 2));
+        }
     }
     break;
 
-    case 0x04: // BEQ (Branch if Equal)
+    case 0x02: // J
+        do_branch((cpu.PC & 0xF0000000) | (GET_TARGET(inst) << 2));
+        break;
 
-        // Crucial: Branch calculation uses the PC of the branch instruction + 4
+    case 0x03: // JAL
+        cpu.regs[31] = cpu.PC + 4;
+        do_branch((cpu.PC & 0xF0000000) | (GET_TARGET(inst) << 2));
+        break;
+
+    case 0x04: // BEQ
         if (cpu.regs[rs] == cpu.regs[rt]) {
-            cpu.branch_target = cpu.PC + 4 + (imm << 2);
-            cpu.delay_slot_state = DELAY_STATE_JUMPING;
+            do_branch(cpu.PC + (imm_se << 2));
         }
 
         break;
 
-    case 0x05: // BNE (Branch if Not Equal)
+    case 0x05: // BNE
         if (cpu.regs[rs] != cpu.regs[rt]) {
-            cpu.branch_target = cpu.PC + 4 + (imm << 2);
-            cpu.delay_slot_state = DELAY_STATE_JUMPING;
+            do_branch(cpu.PC + (imm_se << 2));
         }
 
         break;
 
-    case 0x02: // J (Jump)
-        // Jump target uses top 4 bits of the current delay slot PC
-        cpu.branch_target = ((cpu.PC + 4) & 0xF0000000) | (GET_TARGET(inst) << 2);
-        cpu.delay_slot_state = DELAY_STATE_JUMPING;
+    case 0x06: // BLEZ
+        if ((int32_t)cpu.regs[rs] <= 0) {
+            do_branch(cpu.PC + (imm_se << 2));
+        }
+
         break;
 
-    // ... Implement other non-branch instructions normally ...
+    case 0x07: // BGTZ
+        if ((int32_t)cpu.regs[rs] > 0) {
+            do_branch(cpu.PC + (imm_se << 2));
+        }
+
+        break;
+
+    case 0x08: // ADDI (overflow trap not yet raised, treated as ADDIU)
     case 0x09: // ADDIU
-        cpu.regs[rt] = cpu.regs[rs] + imm;
+        cpu.regs[rt] = cpu.regs[rs] + (uint32_t)imm_se;
         break;
 
-    case 0x10: { // COP0 (Coprocessor 0 Operations) - Opcode 010000
-        // For Coprocessor instructions:
-        // 'rs' acts as the sub-operation selector (MFC0 vs MTC0)
-        // 'rt' is the standard CPU register source/destination
-        // 'rd' is the target Coprocessor 0 system register index
-        uint32_t cop_sub_op = GET_RS(inst);
-        uint32_t rt         = GET_RT(inst);
-        uint32_t cp0_rd     = GET_RD(inst);
+    case 0x0A: // SLTI (signed)
+        cpu.regs[rt] = ((int32_t)cpu.regs[rs] < imm_se) ? 1 : 0;
+        break;
+
+    case 0x0B: // SLTIU (unsigned compare against sign-extended immediate)
+        cpu.regs[rt] = (cpu.regs[rs] < (uint32_t)imm_se) ? 1 : 0;
+        break;
+
+    case 0x0C: // ANDI
+        cpu.regs[rt] = cpu.regs[rs] & imm_ze;
+        break;
+
+    case 0x0D: // ORI
+        cpu.regs[rt] = cpu.regs[rs] | imm_ze;
+        break;
+
+    case 0x0E: // XORI
+        cpu.regs[rt] = cpu.regs[rs] ^ imm_ze;
+        break;
+
+    case 0x0F: // LUI
+        cpu.regs[rt] = imm_ze << 16;
+        break;
+
+    case 0x10: { // COP0 (Coprocessor 0 Operations)
+        uint32_t cop_sub_op = rs;
 
         switch (cop_sub_op) {
-        case 0x00: // MFC0 (Move From Coprocessor 0) - Format: mfc0 rt, rd
+        case 0x00: // MFC0 (Move From Coprocessor 0): mfc0 rt, rd
             if (rt != 0) {
-                // Read from CP0 register 'rd' and write into CPU register 'rt'
-                cpu.regs[rt] = cpu.cp0_regs[cp0_rd];
+                cpu.regs[rt] = cpu.cp0_regs[rd];
             }
 
             break;
 
-        case 0x04: { // MTC0 (Move To Coprocessor 0) - Format: mtc0 rt, rd
-            uint32_t val = cpu.regs[rt];
+        case 0x04: // MTC0 (Move To Coprocessor 0): mtc0 rt, rd
+            cpu.cp0_regs[rd] = cpu.regs[rt];
 
-            // Write the value from CPU register 'rt' into CP0 register 'rd'
-            cpu.cp0_regs[cp0_rd] = val;
-
-            // SPECIAL BEHAVIOR: Trigger specific hardware cascades upon register changes
-            if (cp0_rd == 12) { // SR (Status Register) modified
-                // Games modify the SR register to enable/disable master interrupts.
-                // If they enable interrupts here, we must evaluate if any are pending immediately.
+            // Enabling interrupts through SR may make a pending one fire now.
+            if (rd == CP0_REG_SR) {
                 check_hardware_interrupts();
             }
-        }
-        break;
 
-        case 0x10: // RFE (Restore From Exception) - Sub-funct code (bottom 6 bits == 0x10)
+            break;
+
+        case 0x10: // RFE (Restore From Exception)
             if ((inst & 0x3F) == 0x10) {
-                // The 'rfe' instruction pops the interrupt stack inside the Status Register (SR).
-                // It restores the previous interrupt enable state bits to pull the kernel back to user mode.
-                // Effectively shifts the lower 6 bits of the Status Register right by 2:
+                // Pop the interrupt-enable / mode stack: shift the low 6 bits of
+                // SR right by 2, keeping the top pair (old) in place.
                 uint32_t mode = cpu.cp0_regs[12] & 0x3F;
                 cpu.cp0_regs[12] = (cpu.cp0_regs[12] & ~0x3F) | ((mode >> 2) | (mode & 0x30));
-
-                // Re-evaluate interrupt constraints immediately after popping stack
                 check_hardware_interrupts();
             }
 
             break;
 
         default:
-            // printf("Unhandled Coprocessor 0 Operation: 0x%02X\n", cop_sub_op);
             break;
         }
     }
     break;
 
-    case 0x23: { // LW (Load Word)
-        uint32_t target_addr = cpu.regs[rs] + imm;
-
-        // CRITICAL DIFFERENCE:
-        // Do NOT do: cpu.regs[rt] = MEM_READ_32(target_addr);
-        // Instead, queue it for the NEXT instruction slot.
-        if (rt != 0) { // $0 is hardwired to 0, ignore loads to it
+    // ---- LOADS (result appears after the following instruction) ----
+    case 0x20: // LB (sign-extended byte)
+        if (rt != 0) {
             cpu.load_reg = rt;
-            cpu.load_val = memory_read_word(target_addr);
+            cpu.load_val = (uint32_t)(int32_t)(int8_t)memory_read_byte(cpu.regs[rs] + imm_se);
+        }
+
+        break;
+
+    case 0x21: // LH (sign-extended halfword)
+        if (rt != 0) {
+            cpu.load_reg = rt;
+            cpu.load_val = (uint32_t)(int32_t)(int16_t)memory_read_halfword(cpu.regs[rs] + imm_se);
+        }
+
+        break;
+
+    case 0x23: // LW
+        if (rt != 0) {
+            cpu.load_reg = rt;
+            cpu.load_val = memory_read_word(cpu.regs[rs] + imm_se);
+        }
+
+        break;
+
+    case 0x24: // LBU (zero-extended byte)
+        if (rt != 0) {
+            cpu.load_reg = rt;
+            cpu.load_val = memory_read_byte(cpu.regs[rs] + imm_se);
+        }
+
+        break;
+
+    case 0x25: // LHU (zero-extended halfword)
+        if (rt != 0) {
+            cpu.load_reg = rt;
+            cpu.load_val = memory_read_halfword(cpu.regs[rs] + imm_se);
+        }
+
+        break;
+
+    case 0x22: { // LWL (load word left, unaligned)
+        uint32_t addr    = cpu.regs[rs] + imm_se;
+        uint32_t aligned = memory_read_word(addr & ~3u);
+        // An LWL/LWR pair targets the same register back to back; take the
+        // in-flight value if a load to rt is still pending.
+        uint32_t cur = (cpu.load_reg == rt) ? cpu.load_val : cpu.regs[rt];
+        uint32_t val;
+
+        switch (addr & 3) {
+        case 0:  val = (cur & 0x00FFFFFF) | (aligned << 24); break;
+        case 1:  val = (cur & 0x0000FFFF) | (aligned << 16); break;
+        case 2:  val = (cur & 0x000000FF) | (aligned << 8);  break;
+        default: val = aligned; break;
+        }
+
+        if (rt != 0) {
+            cpu.load_reg = rt;
+            cpu.load_val = val;
         }
     }
     break;
 
+    case 0x26: { // LWR (load word right, unaligned)
+        uint32_t addr    = cpu.regs[rs] + imm_se;
+        uint32_t aligned = memory_read_word(addr & ~3u);
+        uint32_t cur = (cpu.load_reg == rt) ? cpu.load_val : cpu.regs[rt];
+        uint32_t val;
+
+        switch (addr & 3) {
+        case 0:  val = aligned; break;
+        case 1:  val = (cur & 0xFF000000) | (aligned >> 8);  break;
+        case 2:  val = (cur & 0xFFFF0000) | (aligned >> 16); break;
+        default: val = (cur & 0xFFFFFF00) | (aligned >> 24); break;
+        }
+
+        if (rt != 0) {
+            cpu.load_reg = rt;
+            cpu.load_val = val;
+        }
+    }
+    break;
+
+    // ---- STORES ----
+    case 0x28: // SB
+        if (!cache_isolated()) {
+            memory_write_byte(cpu.regs[rs] + imm_se, cpu.regs[rt] & 0xFF);
+        }
+
+        break;
+
+    case 0x29: // SH
+        if (!cache_isolated()) {
+            memory_write_halfword(cpu.regs[rs] + imm_se, cpu.regs[rt] & 0xFFFF);
+        }
+
+        break;
+
+    case 0x2B: // SW
+        if (!cache_isolated()) {
+            memory_write_word(cpu.regs[rs] + imm_se, cpu.regs[rt]);
+        }
+
+        break;
+
+    case 0x2A: { // SWL (store word left, unaligned)
+        uint32_t addr    = cpu.regs[rs] + imm_se;
+        uint32_t aligned = addr & ~3u;
+        uint32_t mem     = memory_read_word(aligned);
+        uint32_t reg     = cpu.regs[rt];
+        uint32_t val;
+
+        switch (addr & 3) {
+        case 0:  val = (mem & 0xFFFFFF00) | (reg >> 24); break;
+        case 1:  val = (mem & 0xFFFF0000) | (reg >> 16); break;
+        case 2:  val = (mem & 0xFF000000) | (reg >> 8);  break;
+        default: val = reg; break;
+        }
+
+        if (!cache_isolated()) {
+            memory_write_word(aligned, val);
+        }
+    }
+    break;
+
+    case 0x2E: { // SWR (store word right, unaligned)
+        uint32_t addr    = cpu.regs[rs] + imm_se;
+        uint32_t aligned = addr & ~3u;
+        uint32_t mem     = memory_read_word(aligned);
+        uint32_t reg     = cpu.regs[rt];
+        uint32_t val;
+
+        switch (addr & 3) {
+        case 0:  val = reg; break;
+        case 1:  val = (mem & 0x000000FF) | (reg << 8);  break;
+        case 2:  val = (mem & 0x0000FFFF) | (reg << 16); break;
+        default: val = (mem & 0x00FFFFFF) | (reg << 24); break;
+        }
+
+        if (!cache_isolated()) {
+            memory_write_word(aligned, val);
+        }
+    }
+    break;
+
+    default:
+        // Unimplemented primary opcode: no-op for now.
+        break;
     }
 
-    // Register $0 is hardwired to 0
+    // Register $0 is hardwired to 0 (guard against writes above).
     cpu.regs[0] = 0;
 
-    // ---- 4. APPLY THE DELAYED LOAD WRITE-BACK ----
-    // This happens AFTER the instruction execution is done but BEFORE the PC moves.
-    if (delayed_write_reg != 0) {
-        cpu.regs[delayed_write_reg] = delayed_write_val;
+    // ---- APPLY THE DELAYED LOAD WRITE-BACK ----
+    // Applied after execution so the instruction in the load-delay slot read
+    // the register's previous value.
+    if (delayed_reg != 0) {
+        cpu.regs[delayed_reg] = delayed_val;
     }
 
-    // ---- 5. UPDATE PROGRAM COUNTER (END OF CYCLE) ----
-    if (cpu.delay_slot_state == DELAY_STATE_DELAY_SLOT) {
-        // We just executed the instruction in the delay slot. Perform the scheduled jump!
-        cpu.PC = cpu.branch_target;
-        cpu.delay_slot_state = DELAY_STATE_NONE;
-    } else {
-        cpu.PC += 4;
-    }
+    cpu.regs[0] = 0;
 }
 
 void
-check_hardware_interrupts()
+check_hardware_interrupts(void)
 {
     uint32_t sr = cpu.cp0_regs[CP0_REG_SR];
 
@@ -199,34 +513,31 @@ check_hardware_interrupts()
     }
 
     // Condition 2 & 3: Check if the PSX hardware line (IM2) is pending and allowed
-    // Local PSX hardware logic must match what the MIPS status register permits.
     uint32_t local_pending = cpu.i_stat & cpu.i_mask;
 
     if (local_pending != 0 && (sr & SR_IM2) != 0) {
         // ---- EXCEPTION HANDLING STEP ----
 
-        // Populate the CP0 CAUSE register (Index 13)
-        // Set bit 10 to indicate hardware interrupt line 0 is firing.
-        // Set bits 2-6 to 0 to indicate Exception Code 0 (INT / Hardware Interrupt).
-        cpu.cp0_regs[CP0_REG_CAUSE] = (1 << 10) | (0 << 2);
+        // CAUSE: set IP2 (bit 10, hardware interrupt line 0), ExcCode 0 (INT).
+        cpu.cp0_regs[CP0_REG_CAUSE] = (1 << 10);
 
-        if (cpu.delay_slot_state != DELAY_STATE_NONE) {
-            // Flag bit 31 of CAUSE if the exception hit inside a branch delay slot
-            cpu.cp0_regs[CP0_REG_CAUSE] |= (1 << 31);
-            cpu.cp0_regs[CP0_REG_EPC] = cpu.PC - 4; // Point EPC back to the branch instruction
+        if (cpu.in_delay_slot) {
+            // Flag BD (bit 31) and point EPC at the branch, not the delay slot.
+            cpu.cp0_regs[CP0_REG_CAUSE] |= (1u << 31);
+            cpu.cp0_regs[CP0_REG_EPC] = cpu.current_pc - 4;
         } else {
-            cpu.cp0_regs[CP0_REG_EPC] = cpu.PC;     // Point EPC to current instruction
+            cpu.cp0_regs[CP0_REG_EPC] = cpu.current_pc;
         }
 
-        // --- MANAGE STATUS REGISTER STACK SHIFT ---
-        // Push the interrupt state stack: Current <- Previous <- Old
-        // Bits 0-5 are shifted left by 2 bits. The bottom 2 bits become 0 (Kernel mode, Ints disabled)
+        // Push the interrupt/mode stack: shift the low 6 bits of SR left by 2.
         uint32_t stack = sr & 0x3F;
         cpu.cp0_regs[CP0_REG_SR] = (sr & ~0x3F) | ((stack << 2) & 0x3F);
 
-        // Vector the PC directly to the exception handler address
-        // Note: Real hardware checks the SR_BEV bit, but PSX always uses 0x80000080.
-        cpu.PC = 0x80000080;
-        cpu.delay_slot_state = DELAY_STATE_NONE;
+        // Vector to the general exception handler. BEV selects the base.
+        uint32_t vector = (sr & SR_BEV) ? 0xBFC00180 : 0x80000080;
+        cpu.PC = vector;
+        cpu.next_pc = vector + 4;
+        cpu.branch_taken = 0;
+        cpu.in_delay_slot = 0;
     }
 }
