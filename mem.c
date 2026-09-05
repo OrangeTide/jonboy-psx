@@ -8,12 +8,10 @@
 #include "psio.h"
 #include "spu.h"
 #include "timer.h"
-#include <stdio.h>
-#include <string.h>
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdlib.h>
 
 uint8_t system_ram[MEM_MAX_SIZE];
 uint8_t bios_rom[BIOS_SIZE];
@@ -388,5 +386,54 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
     default:
         // printf("Unhandled MMIO Word Write: 0x%08X = 0x%08X\n", physical_addr, value);
         break;
+    }
+}
+
+uint32_t
+memory_read_parallel_io(uint32_t address)
+{
+    // Mask address to map into the 512KB expansion space
+    uint32_t offset = address & 0x0007FFFF;
+
+    if (address >= 0x1F000000 && address <= 0x1F07FFFF) {
+        // PSX CPU is executing code or reading from the PSIO firmware ROM
+        if (psio.firmware_rom) {
+            return *(uint32_t*)&psio.firmware_rom[offset];
+        }
+        return 0xFFFFFFFF;
+    }
+
+    // Intercept hardware communication registers
+    switch (address) {
+        case 0x1F802000: // Example PSIO Status Register
+            return psio.status_reg;
+
+        case 0x1F802004: // Data FIFO register (Pop data from virtual SD card)
+            if (psio.fifo_count > 0) {
+                uint32_t data = *(uint32_t*)&psio.fifo_buffer[psio.fifo_ptr];
+                psio.fifo_ptr += 4;
+                psio.fifo_count -= 4;
+                return data;
+            }
+            return 0; // FIFO empty
+
+        default:
+            return 0;
+    }
+}
+
+void
+memory_write_parallel_io(uint32_t address, uint32_t value)
+{
+    switch (address) {
+        case 0x1F802000: // Command Register
+            psio.command_reg = value;
+            // Trigger internal emulator logic to process the command (e.g., fetch sector)
+            process_psio_command();
+            break;
+
+        case 0x1F802008: // Sector Address LBA tracking register
+            // Your logic to map value to the file offset in psio.sd_card_file
+            break;
     }
 }
