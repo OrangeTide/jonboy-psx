@@ -2,6 +2,7 @@
 #define SDL_MAIN_HANDLED
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include "cart.h"
 
 int SDLCALL jonboy_runapp(int argc, char *argv[]);
 
@@ -21,6 +22,8 @@ jonboy_runapp(int argc, char *argv[])
     }
 
     printf("Hello World\n");
+    int result = cart_load("cart.bin");
+    printf("result=%d\n", result);
 
     SDL_Quit();
 
