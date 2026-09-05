@@ -145,8 +145,7 @@ jonboy_runapp(int argc, char *argv[])
                     break;
                 }
 
-                step_cpu();
-                check_hardware_interrupts(); // Evaluate peripheral lines
+                step_cpu(); // interrupts are recognized inside step_cpu
             }
 
             accumulator -= time_bridge;
@@ -235,12 +234,12 @@ run_headless(const char *path, uint32_t load_addr, uint32_t start_pc, uint64_t m
            path, load_addr, start_pc, (unsigned long long)max_steps);
 
     cpu_reset(start_pc);
+    cpu.halt_on_break = 1; // let a test use BREAK to stop and report
 
     uint64_t steps = 0;
 
     while (!cpu.halted && steps < max_steps) {
-        step_cpu();
-        check_hardware_interrupts();
+        step_cpu(); // interrupts are recognized inside step_cpu
         steps++;
     }
 

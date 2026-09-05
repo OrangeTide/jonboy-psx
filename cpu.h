@@ -46,6 +46,22 @@
 
 #define cp0_epc cp0_regs[CP0_REG_EPC]
 
+// ============================================================================
+// CP0 CAUSE EXCEPTION CODES (ExcCode field, CAUSE bits 2-6)
+// ============================================================================
+enum {
+    EXC_INT      = 0x00, // External interrupt
+    EXC_ADEL     = 0x04, // Address error on load or instruction fetch
+    EXC_ADES     = 0x05, // Address error on store
+    EXC_IBE      = 0x06, // Bus error on instruction fetch
+    EXC_DBE      = 0x07, // Bus error on data access
+    EXC_SYSCALL  = 0x08, // SYSCALL instruction
+    EXC_BREAK    = 0x09, // BREAK instruction
+    EXC_RI       = 0x0A, // Reserved (illegal) instruction
+    EXC_CPU      = 0x0B, // Coprocessor unusable
+    EXC_OVERFLOW = 0x0C  // Arithmetic overflow
+};
+
 // Standard MIPS-I Coprocessor 0 Hardware Register Indices
 enum {
     CP0_REG_INDEX    = 0,   // TLB Index
@@ -99,16 +115,19 @@ typedef struct {
     // Index 14: EPC (Exception Program Counter)
     uint32_t cp0_regs[32];
 
-    // Set when the CPU executes BREAK or SYSCALL. The run loops stop stepping
-    // once this is set. Used by the headless test harness to know a program
-    // has signalled completion.
+    // Set when the CPU halts. The run loops stop stepping once this is set.
+    // Used by the headless test harness to know a program has finished.
     uint8_t  halted;
+
+    // When set, BREAK stops the CPU (halted) instead of raising an exception.
+    // The headless harness enables this so a test can use BREAK as a monitor
+    // trap to return control and report results. SYSCALL always vectors.
+    uint8_t  halt_on_break;
 } R3051_CPU;
 
 extern R3051_CPU cpu;
 
 void cpu_reset(uint32_t start_pc);
 void step_cpu(void);
-void check_hardware_interrupts(void);
 
 #endif

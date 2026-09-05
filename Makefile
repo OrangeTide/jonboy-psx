@@ -20,15 +20,17 @@ $(BINDIR)/jonboy : cpu.c dma.c gpu.c main.c mem.c pad.c rom.c timer.c vram.c | $
 	$(CC) -o $@ -MMD $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 $(BINDIR)/jonboy : CFLAGS:=$(CFLAGS) $(shell pkg-config --cflags sdl3)
 $(BINDIR)/jonboy : LDLIBS:=$(LDLIBS) $(shell pkg-config --libs sdl3)
-## testcart
-all :: $(BINDIR)/test1.cart
+## testcarts
+TESTS=test1 test2
+TEST_CARTS=$(TESTS:%=$(BINDIR)/%.cart)
+all :: $(TEST_CARTS)
 clean ::
-	$(RM) $(BINDIR)/test1.cart $(BINDIR)/test1.elf $(BINDIR)/test1.o
-$(BINDIR)/test1.cart : $(BINDIR)/test1.elf
+	$(RM) $(TESTS:%=$(BINDIR)/%.cart) $(TESTS:%=$(BINDIR)/%.elf) $(TESTS:%=$(BINDIR)/%.o)
+$(BINDIR)/%.cart : $(BINDIR)/%.elf
 	mipsel-unknown-elf-objcopy -O binary -j .text -j .data $< $@
-$(BINDIR)/test1.o : test1.asm
+$(BINDIR)/%.o : %.asm | $(BINDIR)
 	mipsel-unknown-elf-as -march=r3000 -mabi=32 -o $@ $<
-$(BINDIR)/test1.elf : $(BINDIR)/test1.o
+$(BINDIR)/%.elf : $(BINDIR)/%.o
 	mipsel-unknown-elf-ld -Ttext 0x0 -e __start -o $@ $<
 ## end
 -include $(wildcard *.d)

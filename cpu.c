@@ -35,13 +35,96 @@ cache_isolated(void)
     return (cpu.cp0_regs[CP0_REG_SR] & SR_Isc) != 0;
 }
 
+// Enter the general exception handler with the given ExcCode. Records EPC and
+// the branch-delay flag, sets CAUSE, pushes the SR interrupt/mode stack, and
+// vectors the PC. cpu.current_pc / cpu.in_delay_slot must already describe the
+// faulting instruction.
+static void
+raise_exception(uint32_t exc_code)
+{
+    uint32_t sr = cpu.cp0_regs[CP0_REG_SR];
+
+    // EPC points at the faulting instruction, or at the branch if the fault
+    // happened in a delay slot (so the branch re-runs on return).
+    if (cpu.in_delay_slot) {
+        cpu.cp0_regs[CP0_REG_EPC] = cpu.current_pc - 4;
+    } else {
+        cpu.cp0_regs[CP0_REG_EPC] = cpu.current_pc;
+    }
+
+    // CAUSE: set ExcCode and the BD bit, and keep the interrupt-pending bits
+    // (IP, bits 8-15) which mirror the hardware lines.
+    uint32_t cause = (exc_code & 0x1F) << 2;
+
+    if (cpu.in_delay_slot) {
+        cause |= (1u << 31);
+    }
+
+    cause |= cpu.cp0_regs[CP0_REG_CAUSE] & 0x0000FF00;
+    cpu.cp0_regs[CP0_REG_CAUSE] = cause;
+
+    // Push the interrupt-enable / mode stack: the low 6 bits of SR shift left
+    // by 2, entering kernel mode with interrupts disabled.
+    uint32_t stack = sr & 0x3F;
+    cpu.cp0_regs[CP0_REG_SR] = (sr & ~0x3F) | ((stack << 2) & 0x3F);
+
+    // Vector to the general exception handler. BEV selects the ROM vector.
+    uint32_t vector = (sr & SR_BEV) ? 0xBFC00180 : 0x80000080;
+    cpu.PC = vector;
+    cpu.next_pc = vector + 4;
+    cpu.branch_taken = 0;
+    cpu.in_delay_slot = 0;
+}
+
+// Update CAUSE bit 10 (IP2) from the aggregated external line, then report
+// whether an interrupt is both pending and enabled. Uses the full CAUSE.IP vs
+// SR.IM comparison across all eight lines.
+static int
+interrupt_pending(void)
+{
+    if (cpu.i_stat & cpu.i_mask) {
+        cpu.cp0_regs[CP0_REG_CAUSE] |= (1u << 10);
+    } else {
+        cpu.cp0_regs[CP0_REG_CAUSE] &= ~(1u << 10);
+    }
+
+    uint32_t sr = cpu.cp0_regs[CP0_REG_SR];
+
+    if ((sr & SR_IEc) == 0) {
+        return 0; // interrupts globally disabled
+    }
+
+    return (cpu.cp0_regs[CP0_REG_CAUSE] & sr & 0x0000FF00) != 0;
+}
+
 void
 step_cpu(void)
 {
+    // ---- RECOGNIZE PENDING INTERRUPTS ----
+    // Interrupts are taken at instruction boundaries, before fetching the next
+    // instruction, so EPC names the instruction that has not run yet.
+    if (interrupt_pending()) {
+        cpu.current_pc = cpu.PC;
+        cpu.in_delay_slot = cpu.branch_taken; // the pending instruction is a slot
+        raise_exception(EXC_INT);
+        return;
+    }
+
+    // The instruction about to execute is at cpu.PC. It sits in a delay slot if
+    // the previous instruction took a branch.
+    cpu.current_pc = cpu.PC;
+    cpu.in_delay_slot = cpu.branch_taken;
+
     // ---- FETCH ----
+    // Address error on a misaligned instruction fetch.
+    if (cpu.PC & 3) {
+        cpu.cp0_regs[CP0_REG_BADVADDR] = cpu.PC;
+        raise_exception(EXC_ADEL);
+        return;
+    }
+
     // Fetch through the translating accessor so the virtual PC is mapped to a
     // physical address. Never index system_ram[] directly here.
-    cpu.current_pc = cpu.PC;
     uint32_t inst = memory_read_word(cpu.PC);
 
     // ---- ADVANCE PC (delay-slot aware) ----
@@ -49,9 +132,6 @@ step_cpu(void)
     // would fill; a taken branch overwrites cpu.next_pc during execute.
     cpu.PC = cpu.next_pc;
     cpu.next_pc += 4;
-
-    // This instruction is in a delay slot if the previous one branched.
-    cpu.in_delay_slot = cpu.branch_taken;
     cpu.branch_taken = 0;
 
     // ---- CAPTURE PENDING LOAD ----
@@ -110,10 +190,18 @@ step_cpu(void)
             break;
 
         case 0x0C: // SYSCALL
+            raise_exception(EXC_SYSCALL);
+            break;
+
         case 0x0D: // BREAK
-            // Both raise exceptions on real hardware. For the test harness we
-            // treat them as a clean stop so a program can signal completion.
-            cpu.halted = 1;
+            // BREAK is a monitor trap for the headless harness (stop and
+            // report). Under a real BIOS it vectors like any other exception.
+            if (cpu.halt_on_break) {
+                cpu.halted = 1;
+            } else {
+                raise_exception(EXC_BREAK);
+            }
+
             break;
 
         case 0x10: // MFHI
@@ -177,12 +265,36 @@ step_cpu(void)
         }
         break;
 
-        case 0x20: // ADD (overflow trap not yet raised, treated as ADDU)
+        case 0x20: { // ADD (traps on signed overflow)
+            int32_t a = (int32_t)cpu.regs[rs];
+            int32_t b = (int32_t)cpu.regs[rt];
+            int32_t r = (int32_t)((uint32_t)a + (uint32_t)b);
+
+            if (((a ^ r) & (b ^ r)) < 0) {
+                raise_exception(EXC_OVERFLOW); // destination is left unchanged
+            } else {
+                cpu.regs[rd] = (uint32_t)r;
+            }
+        }
+        break;
+
         case 0x21: // ADDU
             cpu.regs[rd] = cpu.regs[rs] + cpu.regs[rt];
             break;
 
-        case 0x22: // SUB (overflow trap not yet raised, treated as SUBU)
+        case 0x22: { // SUB (traps on signed overflow)
+            int32_t a = (int32_t)cpu.regs[rs];
+            int32_t b = (int32_t)cpu.regs[rt];
+            int32_t r = (int32_t)((uint32_t)a - (uint32_t)b);
+
+            if (((a ^ b) & (a ^ r)) < 0) {
+                raise_exception(EXC_OVERFLOW);
+            } else {
+                cpu.regs[rd] = (uint32_t)r;
+            }
+        }
+        break;
+
         case 0x23: // SUBU
             cpu.regs[rd] = cpu.regs[rs] - cpu.regs[rt];
             break;
@@ -272,8 +384,19 @@ step_cpu(void)
 
         break;
 
-    case 0x08: // ADDI (overflow trap not yet raised, treated as ADDIU)
-    case 0x09: // ADDIU
+    case 0x08: { // ADDI (traps on signed overflow)
+        int32_t a = (int32_t)cpu.regs[rs];
+        int32_t r = (int32_t)((uint32_t)a + (uint32_t)imm_se);
+
+        if (((a ^ r) & (imm_se ^ r)) < 0) {
+            raise_exception(EXC_OVERFLOW);
+        } else {
+            cpu.regs[rt] = (uint32_t)r;
+        }
+    }
+    break;
+
+    case 0x09: // ADDIU (no overflow trap)
         cpu.regs[rt] = cpu.regs[rs] + (uint32_t)imm_se;
         break;
 
@@ -314,12 +437,8 @@ step_cpu(void)
 
         case 0x04: // MTC0 (Move To Coprocessor 0): mtc0 rt, rd
             cpu.cp0_regs[rd] = cpu.regs[rt];
-
-            // Enabling interrupts through SR may make a pending one fire now.
-            if (rd == CP0_REG_SR) {
-                check_hardware_interrupts();
-            }
-
+            // Enabling interrupts through SR takes effect at the next
+            // instruction boundary, where step_cpu re-checks for pending lines.
             break;
 
         case 0x10: // RFE (Restore From Exception)
@@ -328,7 +447,6 @@ step_cpu(void)
                 // SR right by 2, keeping the top pair (old) in place.
                 uint32_t mode = cpu.cp0_regs[12] & 0x3F;
                 cpu.cp0_regs[12] = (cpu.cp0_regs[12] & ~0x3F) | ((mode >> 2) | (mode & 0x30));
-                check_hardware_interrupts();
             }
 
             break;
@@ -348,21 +466,31 @@ step_cpu(void)
 
         break;
 
-    case 0x21: // LH (sign-extended halfword)
-        if (rt != 0) {
+    case 0x21: { // LH (sign-extended halfword)
+        uint32_t addr = cpu.regs[rs] + imm_se;
+
+        if (addr & 1) {
+            cpu.cp0_regs[CP0_REG_BADVADDR] = addr;
+            raise_exception(EXC_ADEL);
+        } else if (rt != 0) {
             cpu.load_reg = rt;
-            cpu.load_val = (uint32_t)(int32_t)(int16_t)memory_read_halfword(cpu.regs[rs] + imm_se);
+            cpu.load_val = (uint32_t)(int32_t)(int16_t)memory_read_halfword(addr);
         }
+    }
+    break;
 
-        break;
+    case 0x23: { // LW
+        uint32_t addr = cpu.regs[rs] + imm_se;
 
-    case 0x23: // LW
-        if (rt != 0) {
+        if (addr & 3) {
+            cpu.cp0_regs[CP0_REG_BADVADDR] = addr;
+            raise_exception(EXC_ADEL);
+        } else if (rt != 0) {
             cpu.load_reg = rt;
-            cpu.load_val = memory_read_word(cpu.regs[rs] + imm_se);
+            cpu.load_val = memory_read_word(addr);
         }
-
-        break;
+    }
+    break;
 
     case 0x24: // LBU (zero-extended byte)
         if (rt != 0) {
@@ -372,13 +500,18 @@ step_cpu(void)
 
         break;
 
-    case 0x25: // LHU (zero-extended halfword)
-        if (rt != 0) {
-            cpu.load_reg = rt;
-            cpu.load_val = memory_read_halfword(cpu.regs[rs] + imm_se);
-        }
+    case 0x25: { // LHU (zero-extended halfword)
+        uint32_t addr = cpu.regs[rs] + imm_se;
 
-        break;
+        if (addr & 1) {
+            cpu.cp0_regs[CP0_REG_BADVADDR] = addr;
+            raise_exception(EXC_ADEL);
+        } else if (rt != 0) {
+            cpu.load_reg = rt;
+            cpu.load_val = memory_read_halfword(addr);
+        }
+    }
+    break;
 
     case 0x22: { // LWL (load word left, unaligned)
         uint32_t addr    = cpu.regs[rs] + imm_se;
@@ -430,19 +563,29 @@ step_cpu(void)
 
         break;
 
-    case 0x29: // SH
-        if (!cache_isolated()) {
-            memory_write_halfword(cpu.regs[rs] + imm_se, cpu.regs[rt] & 0xFFFF);
+    case 0x29: { // SH
+        uint32_t addr = cpu.regs[rs] + imm_se;
+
+        if (addr & 1) {
+            cpu.cp0_regs[CP0_REG_BADVADDR] = addr;
+            raise_exception(EXC_ADES);
+        } else if (!cache_isolated()) {
+            memory_write_halfword(addr, cpu.regs[rt] & 0xFFFF);
         }
+    }
+    break;
 
-        break;
+    case 0x2B: { // SW
+        uint32_t addr = cpu.regs[rs] + imm_se;
 
-    case 0x2B: // SW
-        if (!cache_isolated()) {
-            memory_write_word(cpu.regs[rs] + imm_se, cpu.regs[rt]);
+        if (addr & 3) {
+            cpu.cp0_regs[CP0_REG_BADVADDR] = addr;
+            raise_exception(EXC_ADES);
+        } else if (!cache_isolated()) {
+            memory_write_word(addr, cpu.regs[rt]);
         }
-
-        break;
+    }
+    break;
 
     case 0x2A: { // SWL (store word left, unaligned)
         uint32_t addr    = cpu.regs[rs] + imm_se;
@@ -500,44 +643,4 @@ step_cpu(void)
     }
 
     cpu.regs[0] = 0;
-}
-
-void
-check_hardware_interrupts(void)
-{
-    uint32_t sr = cpu.cp0_regs[CP0_REG_SR];
-
-    // Condition 1: Check if interrupts are globally enabled right now
-    if ((sr & SR_IEc) == 0) {
-        return; // Interrupts are disabled globally. Do nothing.
-    }
-
-    // Condition 2 & 3: Check if the PSX hardware line (IM2) is pending and allowed
-    uint32_t local_pending = cpu.i_stat & cpu.i_mask;
-
-    if (local_pending != 0 && (sr & SR_IM2) != 0) {
-        // ---- EXCEPTION HANDLING STEP ----
-
-        // CAUSE: set IP2 (bit 10, hardware interrupt line 0), ExcCode 0 (INT).
-        cpu.cp0_regs[CP0_REG_CAUSE] = (1 << 10);
-
-        if (cpu.in_delay_slot) {
-            // Flag BD (bit 31) and point EPC at the branch, not the delay slot.
-            cpu.cp0_regs[CP0_REG_CAUSE] |= (1u << 31);
-            cpu.cp0_regs[CP0_REG_EPC] = cpu.current_pc - 4;
-        } else {
-            cpu.cp0_regs[CP0_REG_EPC] = cpu.current_pc;
-        }
-
-        // Push the interrupt/mode stack: shift the low 6 bits of SR left by 2.
-        uint32_t stack = sr & 0x3F;
-        cpu.cp0_regs[CP0_REG_SR] = (sr & ~0x3F) | ((stack << 2) & 0x3F);
-
-        // Vector to the general exception handler. BEV selects the base.
-        uint32_t vector = (sr & SR_BEV) ? 0xBFC00180 : 0x80000080;
-        cpu.PC = vector;
-        cpu.next_pc = vector + 4;
-        cpu.branch_taken = 0;
-        cpu.in_delay_slot = 0;
-    }
 }
