@@ -33,7 +33,7 @@ $(BINDIR)/jonboy : cpu.c dma.c gpu.c inject.c main.c mem.c pad.c psio.c rom.c sc
 $(BINDIR)/jonboy : CFLAGS:=$(CFLAGS) $(shell pkg-config --cflags sdl3)
 $(BINDIR)/jonboy : LDLIBS:=$(LDLIBS) $(shell pkg-config --libs sdl3)
 ## testcarts
-TESTS=test1 test2 test3 test4
+TESTS=test1 test2 test3 test4 test5 test6
 TEST_CARTS=$(TESTS:%=$(BINDIR)/%.cart)
 all :: $(TEST_CARTS)
 clean ::

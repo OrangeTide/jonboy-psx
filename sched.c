@@ -1,5 +1,6 @@
 #include "sched.h"
 #include "cpu.h"
+#include "gpu.h"
 #include "spu.h"
 #include "timer.h"
 
@@ -15,6 +16,7 @@ psx_hardware_reset(void)
     vblank_acc = 0;
     psx_timers_reset();
     psx_spu_reset();
+    psx_gpu_reset();
 }
 
 void
