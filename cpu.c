@@ -103,6 +103,55 @@ interrupt_pending(void)
     return (cpu.cp0_regs[CP0_REG_CAUSE] & sr & 0x0000FF00) != 0;
 }
 
+// Return the general-purpose register whose pending delayed load an instruction
+// cancels, or 0 when it cancels none (register 0 is never a real load target).
+// The R3000 has a single load-delay latch, so any instruction that targets a
+// register discards a load to that same register still waiting in the slot:
+//   - a register-writing instruction's write wins over the pending load,
+//     regardless of the value it writes (this is why comparing the destination
+//     register, not the register's value, is required);
+//   - a second load to the same register overwrites the latch before the first
+//     load writes back, so the first load never appears.
+// This is the Amidog MEM ADV ("advanced load") behavior.
+static uint32_t
+delay_slot_dest(uint32_t opcode, uint32_t funct, uint32_t rs,
+                uint32_t rt, uint32_t rd)
+{
+    switch (opcode) {
+    case 0x00: // SPECIAL
+        switch (funct) {
+        case 0x00: case 0x02: case 0x03: // SLL, SRL, SRA
+        case 0x04: case 0x06: case 0x07: // SLLV, SRLV, SRAV
+        case 0x20: case 0x21: case 0x22: case 0x23: // ADD, ADDU, SUB, SUBU
+        case 0x24: case 0x25: case 0x26: case 0x27: // AND, OR, XOR, NOR
+        case 0x2A: case 0x2B:                        // SLT, SLTU
+        case 0x10: case 0x12:                        // MFHI, MFLO
+        case 0x09:                                   // JALR
+            return rd;
+        default:
+            // JR, MULT/DIV, MTHI/MTLO, SYSCALL, BREAK write no GPR.
+            return 0;
+        }
+    case 0x08: case 0x09: case 0x0A: case 0x0B: // ADDI, ADDIU, SLTI, SLTIU
+    case 0x0C: case 0x0D: case 0x0E:            // ANDI, ORI, XORI
+    case 0x0F:                                  // LUI
+        return rt;
+    case 0x20: case 0x21: case 0x22: case 0x23: // LB, LH, LWL, LW
+    case 0x24: case 0x25: case 0x26:            // LBU, LHU, LWR
+        // A new load to the same register overrides the pending one.
+        return rt;
+    case 0x01: // REGIMM: BLTZAL / BGEZAL also link into $ra
+        return ((rt & 0x1E) == 0x10) ? 31 : 0;
+    case 0x03: // JAL links into $ra
+        return 31;
+    case 0x10: // COP0: MFC0 writes rt immediately
+        return (rs == 0x00) ? rt : 0;
+    default:
+        // Stores, branches, COP2, etc. do not clobber a pending load.
+        return 0;
+    }
+}
+
 void
 step_cpu(void)
 {
@@ -152,11 +201,6 @@ step_cpu(void)
     uint32_t delayed_val = cpu.load_val;
     cpu.load_reg = 0;
     cpu.load_val = 0;
-
-    // Snapshot the load target's current value. If the instruction about to
-    // run writes that same register, the pending load is discarded (R3000
-    // behavior), which we detect below by seeing the register change.
-    uint32_t delayed_prev = (delayed_reg != 0) ? cpu.regs[delayed_reg] : 0;
 
     // ---- DECODE ----
     uint32_t opcode = GET_OPCODE(inst);
@@ -535,9 +579,11 @@ step_cpu(void)
     case 0x22: { // LWL (load word left, unaligned)
         uint32_t addr    = cpu.regs[rs] + imm_se;
         uint32_t aligned = memory_read_word(addr & ~3u);
-        // An LWL/LWR pair targets the same register back to back; take the
-        // in-flight value if a load to rt is still pending.
-        uint32_t cur = (cpu.load_reg == rt) ? cpu.load_val : cpu.regs[rt];
+        // LWL/LWR merge into the register's other bytes. When a load to rt is
+        // still in the delay slot (an LWL/LWR pair, or a load right before),
+        // the pending value is forwarded as the merge source rather than the
+        // register's committed contents.
+        uint32_t cur = (delayed_reg == rt) ? delayed_val : cpu.regs[rt];
         uint32_t val;
 
         switch (addr & 3) {
@@ -557,7 +603,7 @@ step_cpu(void)
     case 0x26: { // LWR (load word right, unaligned)
         uint32_t addr    = cpu.regs[rs] + imm_se;
         uint32_t aligned = memory_read_word(addr & ~3u);
-        uint32_t cur = (cpu.load_reg == rt) ? cpu.load_val : cpu.regs[rt];
+        uint32_t cur = (delayed_reg == rt) ? delayed_val : cpu.regs[rt];
         uint32_t val;
 
         switch (addr & 3) {
@@ -656,10 +702,14 @@ step_cpu(void)
 
     // ---- APPLY THE DELAYED LOAD WRITE-BACK ----
     // Applied after execution so the instruction in the load-delay slot read
-    // the register's previous value. If that instruction wrote the load
-    // target register itself, its write wins and the load is discarded, so
-    // only apply the loaded value when the register was left untouched.
-    if (delayed_reg != 0 && cpu.regs[delayed_reg] == delayed_prev) {
+    // the register's previous value. If that instruction wrote the load target
+    // register itself, its write wins and the load is discarded (R3000
+    // behavior), so only apply the loaded value when the delay-slot instruction
+    // did not target that register. Comparing the destination register, rather
+    // than the register's value, catches a delay-slot write that stores the
+    // same value the register already held (the Amidog MEM ADV case).
+    if (delayed_reg != 0
+        && delay_slot_dest(opcode, funct, rs, rt, rd) != delayed_reg) {
         cpu.regs[delayed_reg] = delayed_val;
     }
 
