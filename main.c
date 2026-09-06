@@ -20,6 +20,7 @@ static int g_psio_boot = 0;               // inject the PSIO boot stub over the 
 static const char *g_psio_sd = NULL;       // optional SD-card image to mount
 static const char *g_psio_firmware = NULL; // optional PSIO firmware ROM image
 static const char *g_bios_path = "bios.bin"; // BIOS image to load
+static const char *g_sideload_exe = NULL;    // PS-EXE to run atop the booted kernel
 
 #define TARGET_FPS 60
 
@@ -445,11 +446,37 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
     }
 
     cpu_reset(0xBFC00000);
-    cpu.halt_on_break = 1;
+    // A sideloaded program runs with a live BIOS, so BREAK must vector to the
+    // handler (some tests rely on it) rather than stopping the harness.
+    cpu.halt_on_break = g_sideload_exe ? 0 : 1;
 
     uint64_t steps = 0;
 
+    // When sideloading, run the BIOS until it hands control to the shell entry
+    // (0x80030000), by which point the kernel is fully initialized. Then load
+    // the PS-EXE over RAM and jump to its entry, so it runs with a live BIOS.
+    int sideloaded = 0;
+
     while (!cpu.halted && steps < max_steps) {
+        if (g_sideload_exe && !sideloaded && cpu.PC == 0x80030000) {
+            uint32_t pc, gp, sp;
+
+            if (mem_load_exe(g_sideload_exe, &pc, &gp, &sp) != 0) {
+                fprintf(stderr, "sideload: failed to load %s\n", g_sideload_exe);
+                return 1;
+            }
+
+            cpu.PC = pc;
+            cpu.next_pc = pc + 4;
+            cpu.regs[28] = gp;
+            cpu.regs[29] = sp;
+            cpu.regs[30] = sp;
+            sideloaded = 1;
+            printf("Sideloaded %s at PC=0x%08X (kernel up, step %llu)\n",
+                   g_sideload_exe, pc, (unsigned long long)steps);
+            continue;
+        }
+
         step_cpu();
         steps++;
     }
@@ -508,6 +535,9 @@ main(int argc, char *argv[])
             exe_file = argv[++i];
         } else if (strcmp(argv[i], "--boot") == 0) {
             boot_mode = 1;
+        } else if (strcmp(argv[i], "--sideload") == 0 && i + 1 < argc) {
+            g_sideload_exe = argv[++i];
+            boot_mode = 1; // sideload runs through the boot path
         } else if (strcmp(argv[i], "--psio") == 0) {
             g_psio_boot = 1;
         } else if (strcmp(argv[i], "--sd") == 0 && i + 1 < argc) {
