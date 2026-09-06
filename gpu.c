@@ -72,6 +72,17 @@ typedef struct {
 static uint16_t
 rgb_to_555(int r, int g, int b)
 {
+    // Clamp each channel to 0-255 first. An out-of-range value (from gouraud
+    // interpolation overshooting at an edge, or a modulated texel) would
+    // otherwise let r>>3 exceed 5 bits and corrupt the neighbouring channel,
+    // showing up as rainbow speckle.
+    if (r < 0) r = 0;
+    if (r > 255) r = 255;
+    if (g < 0) g = 0;
+    if (g > 255) g = 255;
+    if (b < 0) b = 0;
+    if (b > 255) b = 255;
+
     return (uint16_t)(((b >> 3) << 10) | ((g >> 3) << 5) | (r >> 3));
 }
 
@@ -798,6 +809,46 @@ execute_completed_gp0_command(uint32_t opcode, uint32_t* buffer)
             for (uint32_t dy = 0; dy < h; dy++) {
                 for (uint32_t dx = 0; dx < w; dx++) {
                     vram.canvas[(x + dx) & (VRAM_WIDTH - 1)][(y + dy) & (VRAM_HEIGHT - 1)] = px;
+                }
+            }
+        }
+        break;
+
+        case 0x80: { // Copy Rectangle (VRAM to VRAM)
+            int sx = buffer[1] & 0x3FF;
+            int sy = (buffer[1] >> 16) & 0x1FF;
+            int dx = buffer[2] & 0x3FF;
+            int dy = (buffer[2] >> 16) & 0x1FF;
+            int w = buffer[3] & 0xFFFF;
+            int h = (buffer[3] >> 16) & 0xFFFF;
+
+            // A size field of zero means the maximum extent.
+            w = ((w - 1) & 0x3FF) + 1;
+            h = ((h - 1) & 0x1FF) + 1;
+
+            // Copy a row at a time through a temporary buffer so overlapping
+            // source and destination do not corrupt the move: the row buffer
+            // covers horizontal overlap, and iterating away from the
+            // destination covers vertical overlap.
+            uint16_t row[VRAM_WIDTH];
+            int start = 0, end = h, step = 1;
+
+            if (dy > sy) {
+                start = h - 1;
+                end = -1;
+                step = -1;
+            }
+
+            for (int r = start; r != end; r += step) {
+                int syy = (sy + r) & (VRAM_HEIGHT - 1);
+                int dyy = (dy + r) & (VRAM_HEIGHT - 1);
+
+                for (int c = 0; c < w; c++) {
+                    row[c] = vram.canvas[(sx + c) & (VRAM_WIDTH - 1)][syy];
+                }
+
+                for (int c = 0; c < w; c++) {
+                    vram.canvas[(dx + c) & (VRAM_WIDTH - 1)][dyy] = row[c];
                 }
             }
         }
