@@ -181,8 +181,20 @@ jonboy_runapp(int argc, char *argv[])
         last_time = current_time;
         accumulator += elapsed_seconds;
 
-        // Process a complete frame chunk if our time accumulator step threshold is passed
-        while (accumulator >= time_bridge) {
+        // Cap the backlog so we never try to catch up more than a few frames.
+        // Without this, if a frame's worth of CPU steps takes longer than one
+        // real frame (a slower host, or the window was dragged/paused so the
+        // accumulator ballooned), the catch-up loop below would run frame after
+        // frame and never return to poll events, so the close button and keys
+        // would stop responding. Dropping the backlog keeps input responsive.
+        if (accumulator > 4.0 * time_bridge) {
+            accumulator = 4.0 * time_bridge;
+        }
+
+        // Process a complete frame chunk if our time accumulator step threshold
+        // is passed. Bail out immediately if a quit event arrived, so closing
+        // the window does not wait for the whole backlog to drain.
+        while (accumulator >= time_bridge && app.is_running) {
 
             // Run one frame's worth of CPU steps to match 60 Hz timing.
             for (uint32_t step = 0; step < STEPS_PER_FRAME; step++) {
