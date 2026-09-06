@@ -397,8 +397,10 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
     switch (offset) {
     // Interrupt Control Register (0x1F801070 / 0x1F801074)
     case 0x1070:
-        // psx_acknowledge_interrupts(value);
-        cpu.i_stat &= ~value;
+        // Acknowledge interrupts: a written 0 clears the corresponding I_STAT
+        // bit, a written 1 leaves it unchanged. This is an AND with the written
+        // value, not with its complement.
+        cpu.i_stat &= value;
         break;
 
     case 0x1074:

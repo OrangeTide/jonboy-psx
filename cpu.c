@@ -153,6 +153,11 @@ step_cpu(void)
     cpu.load_reg = 0;
     cpu.load_val = 0;
 
+    // Snapshot the load target's current value. If the instruction about to
+    // run writes that same register, the pending load is discarded (R3000
+    // behavior), which we detect below by seeing the register change.
+    uint32_t delayed_prev = (delayed_reg != 0) ? cpu.regs[delayed_reg] : 0;
+
     // ---- DECODE ----
     uint32_t opcode = GET_OPCODE(inst);
     uint32_t rs     = GET_RS(inst);
@@ -194,10 +199,14 @@ step_cpu(void)
             do_branch(cpu.regs[rs]);
             break;
 
-        case 0x09: // JALR
+        case 0x09: { // JALR
+            // Read the target before writing the link register, so a JALR with
+            // rd == rs still jumps to the intended address.
+            uint32_t target = cpu.regs[rs];
             cpu.regs[rd] = cpu.PC + 4; // return address = instruction after the slot
-            do_branch(cpu.regs[rs]);
+            do_branch(target);
             break;
+        }
 
         case 0x0C: // SYSCALL
             raise_exception(EXC_SYSCALL);
@@ -647,8 +656,10 @@ step_cpu(void)
 
     // ---- APPLY THE DELAYED LOAD WRITE-BACK ----
     // Applied after execution so the instruction in the load-delay slot read
-    // the register's previous value.
-    if (delayed_reg != 0) {
+    // the register's previous value. If that instruction wrote the load
+    // target register itself, its write wins and the load is discarded, so
+    // only apply the loaded value when the register was left untouched.
+    if (delayed_reg != 0 && cpu.regs[delayed_reg] == delayed_prev) {
         cpu.regs[delayed_reg] = delayed_val;
     }
 
