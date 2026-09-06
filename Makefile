@@ -28,7 +28,7 @@ all :: $(BINDIR)/jonboy
 clean ::
 	$(RM) $(BINDIR)/jonboy
 
-$(BINDIR)/jonboy : cpu.c dma.c gpu.c inject.c main.c mem.c pad.c psio.c rom.c sched.c spu.c timer.c vram.c | $(BINDIR)
+$(BINDIR)/jonboy : cdrom.c cpu.c dma.c gpu.c inject.c main.c mem.c pad.c psio.c rom.c sched.c spu.c timer.c vram.c | $(BINDIR)
 	$(CC) -o $@ -MMD $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 $(BINDIR)/jonboy : CFLAGS:=$(CFLAGS) $(shell pkg-config --cflags sdl3)
 $(BINDIR)/jonboy : LDLIBS:=$(LDLIBS) $(shell pkg-config --libs sdl3)

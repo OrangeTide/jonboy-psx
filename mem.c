@@ -7,6 +7,7 @@
 #include "pad.h"
 #include "psio.h"
 #include "spu.h"
+#include "cdrom.h"
 #include "timer.h"
 
 #include <stdio.h>
@@ -80,6 +81,10 @@ mem_read(uint32_t v_addr, int size)
         return psx_spu_read(a, size);
     }
 
+    if (a >= CDROM_BASE && a < CDROM_BASE + CDROM_SIZE) {
+        return psx_cdrom_read(a, size);
+    }
+
     if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
         uint32_t word = read_hardware_word(a & ~3u);
 
@@ -120,6 +125,11 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
 
     if (a >= SPU_BASE && a < SPU_BASE + SPU_SIZE) {
         psx_spu_write(a, value, size);
+        return;
+    }
+
+    if (a >= CDROM_BASE && a < CDROM_BASE + CDROM_SIZE) {
+        psx_cdrom_write(a, value, size);
         return;
     }
 
