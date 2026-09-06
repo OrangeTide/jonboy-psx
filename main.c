@@ -110,9 +110,12 @@ jonboy_runapp(int argc, char *argv[])
     }
 
     // CREATE THE VRAM UPLOAD TEXTURE:
-    // Format BGR565 accurately represents 16-bit 5-bit color channels without manual translation.
+    // PSX VRAM pixels are 5-5-5: bit15 = mask/STP, bits14-10 = blue,
+    // bits9-5 = green, bits4-0 = red. That layout is XBGR1555. Using a 565
+    // format here shifts the green and blue channels (green steals blue's low
+    // bit, blue steals the mask bit), which tints grays pink and blues green.
     // SDL_TEXTUREACCESS_STREAMING allows us to dynamically lock and overwrite pixels every frame.
-    app.vram_texture = SDL_CreateTexture(app.renderer, SDL_PIXELFORMAT_BGR565, SDL_TEXTUREACCESS_STREAMING, VRAM_WIDTH, VRAM_HEIGHT);
+    app.vram_texture = SDL_CreateTexture(app.renderer, SDL_PIXELFORMAT_XBGR1555, SDL_TEXTUREACCESS_STREAMING, VRAM_WIDTH, VRAM_HEIGHT);
 
     if (!app.vram_texture) {
         SDL_Log("Failed to create VRAM texture: %s", SDL_GetError());
