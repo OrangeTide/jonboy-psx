@@ -3,6 +3,8 @@
 #include "mem.h"
 #include "sched.h"
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 // Approximate CPU cost charged per instruction. The R3000 averages roughly two
 // cycles per instruction; this drives the VBLANK and timer cadence.
@@ -173,6 +175,39 @@ step_cpu(void)
     // the previous instruction took a branch.
     cpu.current_pc = cpu.PC;
     cpu.in_delay_slot = cpu.branch_taken;
+
+    // Optional BIOS console (TTY) capture. The kernel putchar/puts routines are
+    // reached through the A0/B0 jump vectors with the function number in $t1;
+    // mirror their character output to stdout when the TTY variable is set.
+    static int tty_enabled = -1;
+
+    if (tty_enabled < 0) {
+        tty_enabled = getenv("TTY") != NULL;
+    }
+
+    if (tty_enabled) {
+        uint32_t phys = cpu.PC & 0x1FFFFFFF;
+        uint32_t fn   = cpu.regs[9]; // $t1 selects the kernel function
+
+        if ((phys == 0xA0 && fn == 0x3C) || (phys == 0xB0 && fn == 0x3D)) {
+            putchar((int)(cpu.regs[4] & 0xFF)); // $a0 holds the character
+            fflush(stdout);
+        } else if ((phys == 0xA0 && fn == 0x3E) || (phys == 0xB0 && fn == 0x3F)) {
+            uint32_t p = cpu.regs[4]; // $a0 points to a NUL-terminated string
+
+            for (int i = 0; i < 8192; i++) {
+                uint8_t c = (uint8_t)memory_read_byte(p + (uint32_t)i);
+
+                if (c == 0) {
+                    break;
+                }
+
+                putchar(c);
+            }
+
+            fflush(stdout);
+        }
+    }
 
     // ---- FETCH ----
     // Address error on a misaligned instruction fetch.

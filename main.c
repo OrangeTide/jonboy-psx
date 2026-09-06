@@ -339,7 +339,9 @@ bgr555_to_rgb(uint16_t px, int *r, int *g, int *b)
     *b = (b5 << 3) | (b5 >> 2);
 }
 
-// Dump the visible 320x240 top-left region of VRAM as a binary PPM.
+// Dump the visible 320x240 top-left region of VRAM as a binary PPM. Setting the
+// VRAMFULL environment variable dumps the entire 1024x512 VRAM instead, which is
+// needed to inspect off-screen texture pages such as the shell flame at (896,0).
 static void
 dump_vram_ppm(const char *path)
 {
@@ -350,7 +352,9 @@ dump_vram_ppm(const char *path)
         return;
     }
 
-    int w = 320, h = 240;
+    int full = getenv("VRAMFULL") != NULL;
+    int w = full ? VRAM_WIDTH : 320;
+    int h = full ? VRAM_HEIGHT : 240;
     fprintf(f, "P6\n%d %d\n255\n", w, h);
 
     for (int y = 0; y < h; y++) {
