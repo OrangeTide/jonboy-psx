@@ -4,6 +4,7 @@
 #include "spu.h"
 #include "timer.h"
 #include "cdrom.h"
+#include "pad.h"
 
 // Approximate NTSC timing: the ~33.87 MHz CPU clock over 60 Hz is about
 // 564480 cycles per frame. VBLANK is raised once per frame.
@@ -19,6 +20,7 @@ psx_hardware_reset(void)
     psx_spu_reset();
     psx_gpu_reset();
     psx_cdrom_reset();
+    psx_pad_reset();
 }
 
 void

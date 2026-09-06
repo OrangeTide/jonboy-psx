@@ -85,6 +85,10 @@ mem_read(uint32_t v_addr, int size)
         return psx_cdrom_read(a, size);
     }
 
+    if (a >= PAD_BASE && a < PAD_BASE + PAD_SIZE) {
+        return psx_pad_read(a, size);
+    }
+
     if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
         uint32_t word = read_hardware_word(a & ~3u);
 
@@ -130,6 +134,11 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
 
     if (a >= CDROM_BASE && a < CDROM_BASE + CDROM_SIZE) {
         psx_cdrom_write(a, value, size);
+        return;
+    }
+
+    if (a >= PAD_BASE && a < PAD_BASE + PAD_SIZE) {
+        psx_pad_write(a, value, size);
         return;
     }
 
@@ -335,13 +344,6 @@ read_hardware_word(uint32_t physical_addr)
 
 
     switch (offset) {
-    // 2. CONTROLLERS & MEMORY CARDS (0x1F801040)
-    case 0x1040:
-        return psx_pad_read_data();
-
-    case 0x1044:
-        return psx_pad_read_stat();
-
     // 3. INTERRUPT CONTROLLER (0x1F801070 - 0x1F801074)
     case 0x1070:
         return cpu.i_stat;
