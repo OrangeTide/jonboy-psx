@@ -112,11 +112,76 @@ main(void)
         failures++;
     }
 
+    // ---- Reverb: an EON voice through the reverb work area changes output. ----
+    int16_t dry[8192], wet[8192];
+    for (int pass = 0; pass < 2; pass++) {
+        int reverb_on = pass == 1;
+
+        psx_spu_reset();
+        wr16(MAINVOL_L, 0x7FFF);
+        wr16(MAINVOL_R, 0x7FFF);
+
+        // Upload the same looping full-scale ADPCM block.
+        wr16(XFER_ADDR, 0x1000 / 8);
+        wr16(XFER_FIFO, 0x0300);
+        for (int i = 0; i < 7; i++) {
+            wr16(XFER_FIFO, 0x1111);
+        }
+        wr16(0x0, 0x2000);             // voice volume L (leave headroom for reverb)
+        wr16(0x2, 0x2000);             // voice volume R
+        wr16(0x4, 0x1000);             // pitch
+        wr16(0x6, 0x1000 / 8);        // start
+        wr16(0x8, 0x000F);             // fast attack, sustain max
+        wr16(0xA, 0x0000);
+        wr32(0x198, 0x00000001);       // EON: voice 0 to reverb
+
+        if (reverb_on) {
+            // A real "Hall" reverb preset, in hardware register order (dAPF1,
+            // dAPF2, vIIR, vCOMB1..4, vWALL, vAPF1, vAPF2, then the addresses).
+            // set_reverb_reg maps each register offset to its field, so writing
+            // the preset in order reproduces the hardware routing.
+            static const uint16_t hall[32] = {
+                0x007D, 0x005B, 0x6D80, 0x54B8, 0xBED0, 0x0000, 0x0000, 0xBA80,
+                0x5800, 0x5300, 0x04D6, 0x0333, 0x03F0, 0x0227, 0x0374, 0x01EF,
+                0x0334, 0x01B5, 0x0BF0, 0x0C60, 0x0B08, 0x07D0, 0x0AB0, 0x0AE0,
+                0x07A0, 0x0464, 0x0304, 0x0310, 0x0378, 0x038C, 0x8100, 0x8100,
+            };
+            wr16(0x1AA, 0x0080);       // SPUCNT reverb master enable
+            wr16(0x1A2, 0xC000);       // mBASE -> StartAddr word 0x30000
+            wr16(0x184, 0x4000);       // vLOUT
+            wr16(0x186, 0x4000);       // vROUT
+            for (int i = 0; i < 32; i++) {
+                wr16(0x1C0 + i * 2, hall[i]);
+            }
+        }
+
+        wr32(KON, 0x00000001);
+
+        int got = 0;
+        int16_t *dst = reverb_on ? wet : dry;
+        while (got < 4000) {
+            tick_samples(256);
+            got += spu_output_pull(dst + got * 2, 256);
+        }
+    }
+
+    int diff = 0;
+    for (int i = 0; i < 4000 * 2; i++) {
+        if (dry[i] != wet[i]) {
+            diff++;
+        }
+    }
+    if (diff == 0) {
+        fprintf(stderr, "FAIL: reverb did not change the output\n");
+        failures++;
+    }
+
     if (failures) {
         fprintf(stderr, "SPU test: %d failures\n", failures);
         return 1;
     }
     printf("PASS: SPU CD mix and ADPCM voice synthesis correct (voice peak %d)\n",
            peak);
+    printf("PASS: reverb alters output (%d/%d samples differ)\n", diff, 4000 * 2);
     return 0;
 }

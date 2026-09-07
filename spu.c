@@ -104,12 +104,39 @@ static unsigned cd_fifo_w, cd_fifo_r;
 #define SPU_CYCLES_PER_SAMPLE 768
 static uint32_t spu_cycle_acc;
 
+#define EON_OFFSET     0x198 // voice reverb-enable bits
+#define VLOUT_OFFSET   0x184 // reverb output volume left
+#define VROUT_OFFSET   0x186 // reverb output volume right
+#define MBASE_OFFSET   0x1A2 // reverb work area start (8-byte units)
+#define REVERB_OFFSET  0x1C0 // reverb coefficient/address block
+
+// Reverb state, following Neill Corlett's model as implemented in PEOPS
+// (REF/pcsx-redux/src/spu/reverb.cc). Addresses are 16-bit-word offsets into
+// sound RAM; StartAddr/CurrAddr roll through the work area at 22.05 kHz.
+static struct {
+    int StartAddr, CurrAddr;
+    int VolLeft, VolRight;
+    int FB_SRC_A, FB_SRC_B;
+    int IIR_ALPHA, IIR_COEF;
+    int ACC_COEF_A, ACC_COEF_B, ACC_COEF_C, ACC_COEF_D;
+    int FB_ALPHA, FB_X;
+    int IIR_DEST_A0, IIR_DEST_A1, IIR_DEST_B0, IIR_DEST_B1;
+    int ACC_SRC_A0, ACC_SRC_A1, ACC_SRC_B0, ACC_SRC_B1;
+    int ACC_SRC_C0, ACC_SRC_C1, ACC_SRC_D0, ACC_SRC_D1;
+    int IIR_SRC_A0, IIR_SRC_A1, IIR_SRC_B0, IIR_SRC_B1;
+    int MIX_DEST_A0, MIX_DEST_A1, MIX_DEST_B0, MIX_DEST_B1;
+    int IN_COEF_L, IN_COEF_R;
+    int iLastL, iLastR, iL, iR;
+    int cnt;
+} rvb;
+
 void
 psx_spu_reset(void)
 {
     memset(spu_regs, 0, sizeof spu_regs);
     memset(spu_ram, 0, sizeof spu_ram);
     memset(voices, 0, sizeof voices);
+    memset(&rvb, 0, sizeof rvb);
     spu_xfer_addr = 0;
     spu_endx = 0;
     spu_ring_w = spu_ring_r = 0;
@@ -355,12 +382,117 @@ voice_next_sample(int v)
     return s;
 }
 
+// Wrap a reverb offset (in 8-byte units) into the work area, returning a
+// 16-bit-word index into sound RAM. The extra offset is 0 or 1 word.
+static int
+rev_wrap(int off, int extra)
+{
+    int i = off * 4 + rvb.CurrAddr + extra;
+    while (i > 0x3FFFF) {
+        i = rvb.StartAddr + (i - 0x40000);
+    }
+    while (i < rvb.StartAddr) {
+        i = 0x3FFFF - (rvb.StartAddr - i);
+    }
+    return i & 0x3FFFF; // guard against a stray coefficient
+}
+
+static int
+g_buffer(int off)
+{
+    return ((int16_t *)spu_ram)[rev_wrap(off, 0)];
+}
+
+static void
+s_buffer(int off, int val)
+{
+    ((int16_t *)spu_ram)[rev_wrap(off, 0)] = clamp16(val);
+}
+
+static void
+s_buffer1(int off, int val)
+{
+    ((int16_t *)spu_ram)[rev_wrap(off, 1)] = clamp16(val);
+}
+
+// Run one 44.1 kHz reverb step. The heavy filtering happens at 22.05 kHz (every
+// second call); the off cycle holds the last value.
+static void
+reverb_run(int in_l, int in_r, int *out_l, int *out_r)
+{
+    uint16_t spucnt = (uint16_t)load_sized(spu_regs, SPUCNT_OFFSET, 2);
+
+    if (!rvb.StartAddr || !(spucnt & 0x0080)) { // reverb master enable is bit7
+        rvb.iLastL = rvb.iLastR = rvb.iL = rvb.iR = 0;
+        *out_l = *out_r = 0;
+        return;
+    }
+
+    rvb.cnt++;
+    if (!(rvb.cnt & 1)) {
+        *out_l = rvb.iL;
+        *out_r = rvb.iR;
+        return;
+    }
+
+    int IIR_INPUT_A0 = (g_buffer(rvb.IIR_SRC_A0) * rvb.IIR_COEF) / 32768 + (in_l * rvb.IN_COEF_L) / 32768;
+    int IIR_INPUT_A1 = (g_buffer(rvb.IIR_SRC_A1) * rvb.IIR_COEF) / 32768 + (in_r * rvb.IN_COEF_R) / 32768;
+    int IIR_INPUT_B0 = (g_buffer(rvb.IIR_SRC_B0) * rvb.IIR_COEF) / 32768 + (in_l * rvb.IN_COEF_L) / 32768;
+    int IIR_INPUT_B1 = (g_buffer(rvb.IIR_SRC_B1) * rvb.IIR_COEF) / 32768 + (in_r * rvb.IN_COEF_R) / 32768;
+
+    int IIR_A0 = (IIR_INPUT_A0 * rvb.IIR_ALPHA) / 32768 + (g_buffer(rvb.IIR_DEST_A0) * (32768 - rvb.IIR_ALPHA)) / 32768;
+    int IIR_A1 = (IIR_INPUT_A1 * rvb.IIR_ALPHA) / 32768 + (g_buffer(rvb.IIR_DEST_A1) * (32768 - rvb.IIR_ALPHA)) / 32768;
+    int IIR_B0 = (IIR_INPUT_B0 * rvb.IIR_ALPHA) / 32768 + (g_buffer(rvb.IIR_DEST_B0) * (32768 - rvb.IIR_ALPHA)) / 32768;
+    int IIR_B1 = (IIR_INPUT_B1 * rvb.IIR_ALPHA) / 32768 + (g_buffer(rvb.IIR_DEST_B1) * (32768 - rvb.IIR_ALPHA)) / 32768;
+
+    s_buffer1(rvb.IIR_DEST_A0, IIR_A0);
+    s_buffer1(rvb.IIR_DEST_A1, IIR_A1);
+    s_buffer1(rvb.IIR_DEST_B0, IIR_B0);
+    s_buffer1(rvb.IIR_DEST_B1, IIR_B1);
+
+    int ACC0 = (g_buffer(rvb.ACC_SRC_A0) * rvb.ACC_COEF_A) / 32768 +
+               (g_buffer(rvb.ACC_SRC_B0) * rvb.ACC_COEF_B) / 32768 +
+               (g_buffer(rvb.ACC_SRC_C0) * rvb.ACC_COEF_C) / 32768 +
+               (g_buffer(rvb.ACC_SRC_D0) * rvb.ACC_COEF_D) / 32768;
+    int ACC1 = (g_buffer(rvb.ACC_SRC_A1) * rvb.ACC_COEF_A) / 32768 +
+               (g_buffer(rvb.ACC_SRC_B1) * rvb.ACC_COEF_B) / 32768 +
+               (g_buffer(rvb.ACC_SRC_C1) * rvb.ACC_COEF_C) / 32768 +
+               (g_buffer(rvb.ACC_SRC_D1) * rvb.ACC_COEF_D) / 32768;
+
+    int FB_A0 = g_buffer(rvb.MIX_DEST_A0 - rvb.FB_SRC_A);
+    int FB_A1 = g_buffer(rvb.MIX_DEST_A1 - rvb.FB_SRC_A);
+    int FB_B0 = g_buffer(rvb.MIX_DEST_B0 - rvb.FB_SRC_B);
+    int FB_B1 = g_buffer(rvb.MIX_DEST_B1 - rvb.FB_SRC_B);
+
+    s_buffer(rvb.MIX_DEST_A0, ACC0 - (FB_A0 * rvb.FB_ALPHA) / 32768);
+    s_buffer(rvb.MIX_DEST_A1, ACC1 - (FB_A1 * rvb.FB_ALPHA) / 32768);
+    s_buffer(rvb.MIX_DEST_B0, (rvb.FB_ALPHA * ACC0) / 32768 -
+             (FB_A0 * (int)(rvb.FB_ALPHA ^ 0xFFFF8000)) / 32768 - (FB_B0 * rvb.FB_X) / 32768);
+    s_buffer(rvb.MIX_DEST_B1, (rvb.FB_ALPHA * ACC1) / 32768 -
+             (FB_A1 * (int)(rvb.FB_ALPHA ^ 0xFFFF8000)) / 32768 - (FB_B1 * rvb.FB_X) / 32768);
+
+    rvb.iL = (g_buffer(rvb.MIX_DEST_A0) + g_buffer(rvb.MIX_DEST_B0)) / 3;
+    rvb.iR = (g_buffer(rvb.MIX_DEST_A1) + g_buffer(rvb.MIX_DEST_B1)) / 3;
+    rvb.iL = (rvb.iL * rvb.VolLeft) / 0x4000;
+    rvb.iR = (rvb.iR * rvb.VolRight) / 0x4000;
+
+    rvb.CurrAddr++;
+    if (rvb.CurrAddr > 0x3FFFF) {
+        rvb.CurrAddr = rvb.StartAddr;
+    }
+
+    *out_l = rvb.iL;
+    *out_r = rvb.iR;
+}
+
 static void
 mix_frame(void)
 {
     int mainl = vol_level((uint16_t)load_sized(spu_regs, MAINVOL_L_OFFSET, 2));
     int mainr = vol_level((uint16_t)load_sized(spu_regs, MAINVOL_R_OFFSET, 2));
+    uint32_t eon = (uint32_t)load_sized(spu_regs, EON_OFFSET, 4);
     int32_t l = 0, r = 0;
+    int32_t rev_in_l = 0, rev_in_r = 0;
 
     for (int v = 0; v < NUM_VOICES; v++) {
         if (!voices[v].active) {
@@ -370,12 +502,25 @@ mix_frame(void)
         int s = voice_next_sample(v);
         int vl = vol_level((uint16_t)load_sized(spu_regs, base + V_VOL_L, 2));
         int vr = vol_level((uint16_t)load_sized(spu_regs, base + V_VOL_R, 2));
-        l += (s * vl) >> 15;
-        r += (s * vr) >> 15;
+        int sl = (s * vl) >> 15;
+        int sr = (s * vr) >> 15;
+        l += sl;
+        r += sr;
+        if (eon & (1u << v)) {
+            rev_in_l += sl;
+            rev_in_r += sr;
+        }
     }
 
     l = (l * mainl) >> 15;
     r = (r * mainr) >> 15;
+
+    // Reverb: feed the reverb-enabled voices through the work area and add its
+    // output to the mix.
+    int rev_l, rev_r;
+    reverb_run(rev_in_l, rev_in_r, &rev_l, &rev_r);
+    l += rev_l;
+    r += rev_r;
 
     // Mix in one CD-audio frame (already scaled by CD and main volume).
     if (cd_fifo_r != cd_fifo_w) {
@@ -424,6 +569,50 @@ psx_spu_read(uint32_t phys_addr, int size)
     return load_sized(spu_regs, off, size);
 }
 
+// Assign one reverb coefficient/address register by its index within the block
+// (offset (reg - REVERB_OFFSET) / 2). Mirrors the mapping in pcsx-redux.
+static void
+set_reverb_reg(int n, int val)
+{
+    int16_t v = (int16_t)val;
+
+    switch (n) {
+    case 0:  rvb.FB_SRC_A = val; break;
+    case 1:  rvb.FB_SRC_B = v; break;
+    case 2:  rvb.IIR_ALPHA = v; break;
+    case 3:  rvb.ACC_COEF_A = v; break;
+    case 4:  rvb.ACC_COEF_B = v; break;
+    case 5:  rvb.ACC_COEF_C = v; break;
+    case 6:  rvb.ACC_COEF_D = v; break;
+    case 7:  rvb.IIR_COEF = v; break;
+    case 8:  rvb.FB_ALPHA = v; break;
+    case 9:  rvb.FB_X = v; break;
+    case 10: rvb.IIR_DEST_A0 = v; break;
+    case 11: rvb.IIR_DEST_A1 = v; break;
+    case 12: rvb.ACC_SRC_A0 = v; break;
+    case 13: rvb.ACC_SRC_A1 = v; break;
+    case 14: rvb.ACC_SRC_B0 = v; break;
+    case 15: rvb.ACC_SRC_B1 = v; break;
+    case 16: rvb.IIR_SRC_A0 = v; break;
+    case 17: rvb.IIR_SRC_A1 = v; break;
+    case 18: rvb.IIR_DEST_B0 = v; break;
+    case 19: rvb.IIR_DEST_B1 = v; break;
+    case 20: rvb.ACC_SRC_C0 = v; break;
+    case 21: rvb.ACC_SRC_C1 = v; break;
+    case 22: rvb.ACC_SRC_D0 = v; break;
+    case 23: rvb.ACC_SRC_D1 = v; break;
+    case 24: rvb.IIR_SRC_B1 = v; break; // note: +48 is B1, +50 is B0
+    case 25: rvb.IIR_SRC_B0 = v; break;
+    case 26: rvb.MIX_DEST_A0 = v; break;
+    case 27: rvb.MIX_DEST_A1 = v; break;
+    case 28: rvb.MIX_DEST_B0 = v; break;
+    case 29: rvb.MIX_DEST_B1 = v; break;
+    case 30: rvb.IN_COEF_L = v; break;
+    case 31: rvb.IN_COEF_R = v; break;
+    default: break;
+    }
+}
+
 // Apply the voice key-on/off bits carried by a write to KON/KOFF.
 static void
 key_write(uint32_t off, uint32_t value, int size, int on)
@@ -469,6 +658,15 @@ psx_spu_write(uint32_t phys_addr, uint32_t value, int size)
         key_write(off, value, size, 1);
     } else if (off >= KOFF_OFFSET && off < KOFF_OFFSET + 4) {
         key_write(off, value, size, 0);
+    } else if (off == VLOUT_OFFSET) {
+        rvb.VolLeft = (int16_t)value;
+    } else if (off == VROUT_OFFSET) {
+        rvb.VolRight = (int16_t)value;
+    } else if (off == MBASE_OFFSET) {
+        rvb.StartAddr = ((int)(value & 0xFFFF)) << 2;
+        rvb.CurrAddr = rvb.StartAddr;
+    } else if (off >= REVERB_OFFSET && off < REVERB_OFFSET + 64) {
+        set_reverb_reg((off - REVERB_OFFSET) / 2, (int)value);
     }
 }
 
