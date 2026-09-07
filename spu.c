@@ -44,3 +44,13 @@ psx_spu_write(uint32_t phys_addr, uint32_t value, int size)
 
     store_sized(spu_regs, off, value, size);
 }
+
+void
+spu_cd_audio(const int16_t *frames, int nframes)
+{
+    // No audio backend yet: the SPU is a register stub, so the CD-DA stream is
+    // discarded. When the SPU can emit sound, mix these frames in here scaled by
+    // the CD volume registers (0x1F801DB0). Kept as the CD-audio input seam.
+    (void)frames;
+    (void)nframes;
+}

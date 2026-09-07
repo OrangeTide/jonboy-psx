@@ -1,6 +1,7 @@
 #include "cdrom.h"
 #include "cpu.h"
 #include "mem.h"
+#include "spu.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -16,14 +17,19 @@
 // waits for the next response.
 
 // Response interrupt types.
-#define INT1 1 // a data sector is ready
+#define INT1 1 // a data sector is ready / a CD-DA report
 #define INT2 2 // second response / command complete
 #define INT3 3 // first response / acknowledge
+#define INT4 4 // end reached (auto-pause, lead-out)
 #define INT5 5 // error
 
 // Status byte bits reported in responses.
 #define STAT_MOTOR 0x02 // spindle motor on
-#define STAT_READ  0x20 // reading / seeking
+#define STAT_READ  0x20 // reading data sectors
+#define STAT_PLAY  0x80 // playing CD-DA
+
+// CD-DA sector geometry: 2352 raw bytes are 588 stereo 16-bit PCM frames.
+#define CDDA_FRAMES 588
 
 // Cycles to wait before delivering a queued response, so an interrupt does not
 // fire in the same instruction that writes the command, and between sectors.
@@ -96,6 +102,13 @@ static struct {
     int read_lba;           // next sector a read will deliver
     int reading;            // a ReadN/ReadS is in progress
     int read_delay;         // cycles until the next sector
+    uint8_t last_header[8]; // header+subheader of the last read sector (GetlocL)
+
+    // CD-DA playback state.
+    int playing;            // a Play (audio) is in progress
+    int play_lba;           // next audio sector to deliver
+    int play_delay;         // cycles until the next audio sector
+    int muted;              // Mute/Demute gate on CD audio
 
     // Data FIFO: the user portion of the current sector, drained by the data
     // port or DMA channel 3.
@@ -335,7 +348,93 @@ status_byte(void)
     if (cd.reading) {
         s |= STAT_READ;
     }
+    if (cd.playing) {
+        s |= STAT_PLAY;
+    }
     return s;
+}
+
+// The active position, in absolute LBA, for GetlocL/GetlocP and play reports.
+static int
+position_lba(void)
+{
+    if (cd.playing) {
+        return cd.play_lba;
+    }
+    if (cd.reading) {
+        return cd.read_lba;
+    }
+    return cd.seek_lba;
+}
+
+// Fill an 8-byte GetlocP-style position report (all BCD): track, index,
+// track-relative MSF, absolute MSF.
+static void
+fill_locp(uint8_t out[8], int lba)
+{
+    Track *t = track_at_lba(lba);
+    int tno = t ? t->num : 1;
+    int rel = t ? lba - t->start_lba : lba;
+    if (rel < 0) {
+        rel = 0;
+    }
+    int af = lba + LEAD_IN_FRAMES;
+
+    out[0] = bin2bcd(tno);
+    out[1] = bin2bcd(1);
+    out[2] = bin2bcd(rel / (60 * 75));
+    out[3] = bin2bcd((rel / 75) % 60);
+    out[4] = bin2bcd(rel % 75);
+    out[5] = bin2bcd(af / (60 * 75));
+    out[6] = bin2bcd((af / 75) % 60);
+    out[7] = bin2bcd(af % 75);
+}
+
+// Read the raw sector at an absolute LBA into buf. Returns 0 on success.
+static int
+read_raw(int lba, uint8_t *buf)
+{
+    Track *t = track_at_lba(lba);
+    if (!t) {
+        return -1;
+    }
+
+    FILE *f = disc.files[t->file_idx];
+    long pos = (long)(lba - t->file_start_lba) * RAW_SECTOR;
+    if (fseek(f, pos, SEEK_SET) != 0) {
+        return -1;
+    }
+
+    size_t got = fread(buf, 1, RAW_SECTOR, f);
+    if (got < RAW_SECTOR) {
+        memset(buf + got, 0, RAW_SECTOR - got);
+    }
+    return 0;
+}
+
+// Decode one CD-DA sector at play_lba to interleaved 16-bit stereo PCM and hand
+// it to the SPU CD-audio input, which is where it will be mixed once the SPU can
+// emit sound. A muted drive still advances but sends silence.
+static void
+play_audio_sector(void)
+{
+    uint8_t raw[RAW_SECTOR];
+    int16_t pcm[CDDA_FRAMES * 2];
+
+    if (read_raw(cd.play_lba, raw) != 0) {
+        return;
+    }
+
+    if (cd.muted) {
+        memset(pcm, 0, sizeof pcm);
+    } else {
+        // CD-DA is little-endian signed 16-bit, left then right.
+        for (int i = 0; i < CDDA_FRAMES * 2; i++) {
+            pcm[i] = (int16_t)(raw[i * 2] | (raw[i * 2 + 1] << 8));
+        }
+    }
+
+    spu_cd_audio(pcm, CDDA_FRAMES);
 }
 
 static void
@@ -409,6 +508,9 @@ load_sector(void)
         memset(raw + got, 0, RAW_SECTOR - got);
     }
 
+    // Keep the 4-byte header and 4 bytes of subheader for GetlocL.
+    memcpy(cd.last_header, raw + 12, 8);
+
     if (cd.mode & 0x20) {
         cd.data_len = 2340;
         memcpy(cd.data_buf, raw + 12, 2340);
@@ -459,6 +561,7 @@ run_command(uint8_t cmd)
     case 0x1B: // ReadS
         cd.read_lba = cd.seek_lba;
         cd.reading = 1;
+        cd.playing = 0;
         cd.read_delay = CDROM_READ_DELAY;
         stat[0] = status_byte();
         enqueue(INT3, stat, 1);
@@ -466,6 +569,7 @@ run_command(uint8_t cmd)
 
     case 0x09: // Pause
         cd.reading = 0;
+        cd.playing = 0;
         enqueue(INT3, stat, 1);
         stat[0] = status_byte();
         enqueue(INT2, stat, 1);
@@ -473,6 +577,7 @@ run_command(uint8_t cmd)
 
     case 0x08: // Stop
         cd.reading = 0;
+        cd.playing = 0;
         enqueue(INT3, stat, 1);
         enqueue(INT2, stat, 1);
         break;
@@ -480,6 +585,8 @@ run_command(uint8_t cmd)
     case 0x0A: // Init
         cd.mode = 0;
         cd.reading = 0;
+        cd.playing = 0;
+        cd.muted = 0;
         enqueue(INT3, stat, 1);
         enqueue(INT2, stat, 1);
         break;
@@ -509,10 +616,51 @@ run_command(uint8_t cmd)
         break;
     }
 
-    case 0x0C: // Demute
+    case 0x10: { // GetlocL: header+subheader of the last read data sector
+        uint8_t loc[8];
+        memcpy(loc, cd.last_header, 8);
+        enqueue(INT3, loc, 8);
+        break;
+    }
+
+    case 0x11: { // GetlocP: current play/read position (BCD)
+        uint8_t loc[8];
+        fill_locp(loc, position_lba());
+        enqueue(INT3, loc, 8);
+        break;
+    }
+
+    case 0x03: { // Play (CD-DA): from the track parameter, else the last Setloc
+        int start = cd.seek_lba;
+        if (cd.param_count > 0 && cd.param_fifo[0] != 0) {
+            int tno = bcd2bin(cd.param_fifo[0]);
+            for (int i = 0; i < disc.num_tracks; i++) {
+                if (disc.tracks[i].num == tno) {
+                    start = disc.tracks[i].start_lba;
+                    break;
+                }
+            }
+        }
+        cd.play_lba = start;
+        cd.playing = 1;
+        cd.reading = 0;
+        cd.play_delay = CDROM_READ_DELAY;
+        stat[0] = status_byte();
+        enqueue(INT3, stat, 1);
+        break;
+    }
+
     case 0x0B: // Mute
+        cd.muted = 1;
+        enqueue(INT3, stat, 1);
+        break;
+
+    case 0x0C: // Demute
+        cd.muted = 0;
+        enqueue(INT3, stat, 1);
+        break;
+
     case 0x0D: // Setfilter
-    case 0x03: // Play
     case 0x1E: // GetToc
         enqueue(INT3, stat, 1);
         break;
@@ -576,6 +724,36 @@ psx_cdrom_tick(uint32_t cycles)
             enqueue(INT1, stat, 1);
             deliver_next();
             cd.read_delay = CDROM_READ_DELAY;
+        }
+    }
+
+    // CD-DA play pump: stream one audio sector to the SPU per tick, then handle
+    // end-of-track auto-pause, lead-out stop, and periodic position reports.
+    if (cd.playing && cd.irq_flags == 0 && cd.queue_count == 0) {
+        cd.play_delay -= (int)cycles;
+        if (cd.play_delay <= 0) {
+            Track *before = track_at_lba(cd.play_lba);
+            play_audio_sector();
+            cd.play_lba++;
+
+            int at_end = cd.play_lba >= disc.lead_out_lba;
+            Track *after = track_at_lba(cd.play_lba);
+            int crossed = before && after && before->num != after->num;
+
+            if (at_end || ((cd.mode & 0x02) && crossed)) {
+                // Auto-pause at the end of the track, or stop at the lead-out.
+                cd.playing = 0;
+                uint8_t s = status_byte();
+                enqueue(INT4, &s, 1);
+                deliver_next();
+            } else if (cd.mode & 0x04) {
+                // Report mode: hand back the current position each sector.
+                uint8_t rep[8];
+                fill_locp(rep, cd.play_lba);
+                enqueue(INT1, rep, 8);
+                deliver_next();
+            }
+            cd.play_delay = CDROM_READ_DELAY;
         }
     }
 }

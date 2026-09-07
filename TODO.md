@@ -63,21 +63,22 @@ Next up (in order):
   done: INDEX 00 pregaps and PREGAP/POSTGAP are not tracked (INDEX 01 gives each
   track start), which is fine for data boot and enough for CD-DA positioning.
 
-- [ ] audio-track (CD-DA) playback for games that stream music. Depends on the
-  track table above and on an SPU audio output path (see Audio below); until the
-  SPU can emit sound the position and protocol side can still be built and
-  tested. Work:
-  - Play (0x03): start playback at the track in the parameter, or at the last
-    Setloc when no parameter is given. It is a stub now (status reply only).
-  - stream each 2352-byte audio sector as 588 stereo 16-bit PCM frames into the
-    SPU CD-audio input, scaled by the CD volume registers (0x1F801DB0), and gate
-    it on Mute/Demute (0x0B/0x0C, currently stubs).
-  - GetlocL (0x10): reply with the data-sector header (amm, ass, asect, mode,
-    file, channel, submode, coding) of the current position.
-  - GetlocP (0x11): reply with the play position, track, index, relative MSF
-    within the track, and absolute MSF, all in BCD.
-  - honor the Setmode report bit (0x04, deliver an INT1 with position per sector)
-    and the auto-pause bit (0x02, stop at the end of the track).
+- [~] audio-track (CD-DA) playback for games that stream music. The controller
+  and protocol side is done and unit tested (test_cdda.c, `make cdda-test`):
+  - Play (0x03) starts at the track in the parameter, or the last Setloc when no
+    parameter is given; Pause/Stop/Init and a ReadN stop playback.
+  - the play pump streams one 2352-byte audio sector per tick, decoded to 588
+    stereo 16-bit PCM frames and pushed to the SPU CD-audio input (spu_cd_audio).
+    Mute/Demute (0x0B/0x0C) gate it to silence.
+  - GetlocL (0x10) returns the last data sector's header/subheader; GetlocP
+    (0x11) returns the play/read position (track, index, relative and absolute
+    MSF) in BCD. GetTN/GetTD were added with the track table.
+  - the Setmode report bit (0x04) delivers an INT1 position report per sector;
+    the auto-pause bit (0x02) and the lead-out stop the drive with an INT4.
+  Remaining: no sound is actually emitted. spu_cd_audio discards the PCM because
+  the SPU is still a register stub with no audio backend. Finishing this needs
+  the Audio work below: an SDL audio output and CD-volume mixing (0x1F801DB0) in
+  spu_cd_audio. Also not done: XA-ADPCM streaming audio, and CD volume scaling.
 
 ## DMA and interrupts
 
