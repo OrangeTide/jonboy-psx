@@ -52,6 +52,14 @@ in_psio_region(uint32_t a)
     return a >= PSIO_EXP1_BASE && a < PSIO_EXP1_BASE + PSIO_EXP1_SIZE;
 }
 
+// The loader backdoor register window in Expansion Region 2. Checked before the
+// general MMIO block, which also covers this address range.
+static int
+in_loader_region(uint32_t a)
+{
+    return a >= LDR_REG_BASE && a < LDR_REG_BASE + LDR_REG_SIZE;
+}
+
 // Decode a physical address to its region and read a sized value. Sub-word
 // reads of MMIO extract the requested bytes from the containing word.
 static uint32_t
@@ -73,6 +81,10 @@ mem_read(uint32_t v_addr, int size)
 
     if (in_psio_region(a)) {
         return psio_read(a, size);
+    }
+
+    if (in_loader_region(a)) {
+        return loader_read(a, size);
     }
 
     if (a >= SPU_BASE && a < SPU_BASE + SPU_SIZE) {
@@ -122,6 +134,11 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
 
     if (in_psio_region(a)) {
         psio_write(a, value, size);
+        return;
+    }
+
+    if (in_loader_region(a)) {
+        loader_write(a, value, size);
         return;
     }
 

@@ -39,22 +39,28 @@ handshake (0x01 poll, 0x42 read, 0x5A sync, then the per-device payload).
 - [ ] add cd-rom support. cdrom.c implements the register interface and command
   handshake but always reports "no disc". Remaining: load a disc image (cue/bin
   or iso), map LBA to sectors, and deliver sector data.
-- [~] add PSIO support. psio.c presents the cartridge as a ROM in Expansion
-  Region 1 (0x1F000000), which is how a real PSIO takes control: the BIOS checks
-  the boot-hook signature ("Licensed by Sony Computer Entertainment Inc.") at
-  0x1F000084 (pre) / 0x1F000004 (post) and, on a match, calls the function
-  pointer stored just before it (0x1F000080 / 0x1F000000). Verified against the
-  scph5501 BIOS: with a firmware ROM carrying the signature and a vector, the
-  BIOS jumps to the vector and runs cartridge code. Offsets are in psio.h. The
-  earlier doc-based FIFO/status register model was wrong (0x1F000004 is the
-  signature, not a status register) and has been removed.
-  - [ ] menu<->MCU command protocol for reading SD data. Not documented in any
-    open source (lite_menu ships no firmware source, ps-iowned/loader is a
-    not-started RE stub). Must be reverse-engineered from the REF/loader-beta-test
-    MENU.SYS binaries, or via a custom loader that defines its own protocol.
-  - [ ] boot the REF/loader-beta-test MENU.SYS (needs the command protocol above,
-    plus correct polling-loop timing; instant transfers can hang the firmware)
-  - [ ] game-execution path: trap the stock CD-ROM registers (0x1F801800-3) and
-    serve sectors from the ISO the menu selected
-  - [ ] read from FAT32 image (parse the filesystem, not just a raw image)
-  - [ ] read from a hosted directory
+- EXP1 boot hook (verified, reused by the loader below): psio.c presents the
+  cartridge as a ROM in Expansion Region 1. The scph5501 BIOS checks the pre-boot
+  signature ("Licensed by Sony Computer Entertainment Inc.") at 0x1F000084 and,
+  on a match, calls the function pointer at 0x1F000080. Only the pre-boot hook
+  fires on scph5501; the post-boot hook does not. Offsets are in psio.h.
+
+## Loader (in-emulation game menu)
+
+Our own parallel-I/O backdoor loader (the real Cybdyn PSIO protocol is set aside;
+we invent what we need). A guest loader ROM boots via the EXP1 hook, browses host
+image files over the backdoor, and boots a selection. Backdoor registers are in
+Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
+
+- [x] backdoor device: scan the games directory, enumerate names, and boot a
+  selected PS-EXE (deferred until the kernel is up). Wired through mem.c; the
+  directory comes from --games. Verified end to end: a stub loader ROM boots
+  Cube.exe from the menu index.
+- [ ] on-screen menu: replace the auto-boot stub with a real guest loader (C via
+  mipsel-gcc) that draws the game list, moves a cursor with the D-pad, and boots
+  on X. Add it to the build so make produces the loader ROM.
+- [ ] CD image support: index .bin/.cue/.iso and boot them via the game-execution
+  path (trap the stock CD-ROM registers 0x1F801800-3 and serve sectors).
+  Depends on cd-rom support above.
+- [ ] stream file bytes over the backdoor so the guest can read image data
+  directly (needed once the menu wants thumbnails, metadata, or CD sectors)

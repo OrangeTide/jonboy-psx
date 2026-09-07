@@ -21,6 +21,7 @@ static const char *g_psio_sd = NULL;       // optional SD-card image to mount
 static const char *g_psio_firmware = NULL; // optional PSIO firmware ROM image
 static const char *g_bios_path = "bios.bin"; // BIOS image to load
 static const char *g_sideload_exe = NULL;    // PS-EXE to run atop the booted kernel
+static const char *g_games_dir = NULL;       // directory the loader menu browses
 
 #define TARGET_FPS 60
 
@@ -464,6 +465,10 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
         printf("PSIO boot stub injected.\n");
     }
 
+    if (g_games_dir) {
+        loader_set_games_dir(g_games_dir);
+    }
+
     cpu_reset(0xBFC00000);
     // A sideloaded program runs with a live BIOS, so BREAK must vector to the
     // handler (some tests rely on it) rather than stopping the harness.
@@ -475,8 +480,13 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
     // (0x80030000), by which point the kernel is fully initialized. Then load
     // the PS-EXE over RAM and jump to its entry, so it runs with a live BIOS.
     int sideloaded = 0;
+    int kernel_up = 0; // set once the BIOS reaches the shell entry point
 
     while (!cpu.halted && steps < max_steps) {
+        if (cpu.PC == 0x80030000) {
+            kernel_up = 1;
+        }
+
         if (g_sideload_exe && !sideloaded && cpu.PC == 0x80030000) {
             uint32_t pc, gp, sp;
 
@@ -498,6 +508,29 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
 
         step_cpu();
         steps++;
+
+        // The guest menu picked an image and strobed the boot command. Wait
+        // until the kernel is up, then load it over RAM and jump to its entry,
+        // the same way sideloading does.
+        if (loader_boot_pending() && kernel_up) {
+            const char *path = loader_boot_path();
+            uint32_t pc, gp, sp;
+
+            if (path && mem_load_exe(path, &pc, &gp, &sp) == 0) {
+                cpu.PC = pc;
+                cpu.next_pc = pc + 4;
+                cpu.regs[28] = gp;
+                cpu.regs[29] = sp;
+                cpu.regs[30] = sp;
+                printf("Loader booted %s at PC=0x%08X (step %llu)\n",
+                       path, pc, (unsigned long long)steps);
+            } else {
+                fprintf(stderr, "loader: failed to boot %s\n",
+                        path ? path : "(none)");
+            }
+
+            loader_clear_boot();
+        }
     }
 
     printf("Ran %llu steps.\n", (unsigned long long)steps);
@@ -526,6 +559,7 @@ print_usage(const char *prog)
             "  --psio              inject the PSIO boot stub over the BIOS entry\n"
             "  --sd <file>         mount a virtual SD-card image\n"
             "  --firmware <file>   load a PSIO firmware ROM image\n"
+            "  --games <dir>       directory the loader menu browses for images\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
             "  --pc <hex>          entry PC (default = load address)\n"
@@ -563,6 +597,8 @@ main(int argc, char *argv[])
             g_psio_sd = argv[++i];
         } else if (strcmp(argv[i], "--firmware") == 0 && i + 1 < argc) {
             g_psio_firmware = argv[++i];
+        } else if (strcmp(argv[i], "--games") == 0 && i + 1 < argc) {
+            g_games_dir = argv[++i];
         } else if (strcmp(argv[i], "--bios") == 0 && i + 1 < argc) {
             g_bios_path = argv[++i];
         } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
