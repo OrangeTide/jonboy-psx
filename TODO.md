@@ -102,3 +102,8 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
   Depends on cd-rom support above.
 - [ ] stream file bytes over the backdoor so the guest can read image data
   directly (needed once the menu wants thumbnails, metadata, or CD sectors)
+
+## Debugging
+
+- [ ] add gdbserver interface. mipsel-unknown-elf-gdb exists
+- [ ] add a handler so that a hotkey (or signal) will output CPU regs and a short stack trace.
