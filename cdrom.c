@@ -2,6 +2,7 @@
 #include "cpu.h"
 #include "mem.h"
 #include "spu.h"
+#include "xa.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -122,6 +123,7 @@ static struct {
     int data_ptr;
     int data_active;        // the CPU asked for the sector (request bit)
     int sector_started;     // the request cursor has been positioned this sector
+    int xa_audio;           // the last loaded sector was XA audio, sent to the SPU
 } cd;
 
 static int
@@ -142,6 +144,7 @@ psx_cdrom_reset(void)
     // The disc image lives in its own struct, so clearing the controller state
     // does not eject it.
     memset(&cd, 0, sizeof cd);
+    xa_reset();
 }
 
 int
@@ -496,6 +499,7 @@ load_sector(void)
     cd.data_len = 0;
     cd.data_ptr = 0;
     cd.sector_started = 0;
+    cd.xa_audio = 0;
 
     Track *t = track_at_lba(cd.read_lba);
     if (!t) {
@@ -515,6 +519,18 @@ load_sector(void)
 
     // Keep the 4-byte header and 4 bytes of subheader for GetlocL.
     memcpy(cd.last_header, raw + 12, 8);
+
+    // XA-ADPCM streaming audio. When the XA mode bit (0x40) is set and the
+    // Mode2 subheader marks this sector as audio (submode bit 2, raw byte 18),
+    // the drive decodes it and sends the audio to the SPU rather than delivering
+    // it to the CPU as a data sector. The coding byte (raw byte 19) selects the
+    // rate, stereo, and bit depth. File/channel filtering (Setfilter) is not yet
+    // applied, so every audio sector plays.
+    if ((cd.mode & 0x40) && (raw[18] & 0x04)) {
+        xa_decode_sector(raw + 24, raw[19]);
+        cd.xa_audio = 1;
+        return;
+    }
 
     if (cd.mode & 0x20) {
         cd.data_len = 2340;
@@ -592,6 +608,7 @@ run_command(uint8_t cmd)
         cd.reading = 0;
         cd.playing = 0;
         cd.muted = 0;
+        xa_reset();
         enqueue(INT3, stat, 1);
         enqueue(INT2, stat, 1);
         break;
@@ -722,13 +739,26 @@ psx_cdrom_tick(uint32_t cycles)
     if (cd.reading && cd.irq_flags == 0 && cd.queue_count == 0) {
         cd.read_delay -= (int)cycles;
         if (cd.read_delay <= 0) {
-            uint8_t stat[1];
             load_sector();
             cd.read_lba++;
-            stat[0] = status_byte();
-            enqueue(INT1, stat, 1);
-            deliver_next();
-            cd.read_delay = CDROM_READ_DELAY;
+
+            // An XA audio sector was consumed by the SPU, so no data sector is
+            // delivered to the CPU. Keep the drive streaming to the next sector.
+            if (!cd.xa_audio) {
+                uint8_t stat[1] = { status_byte() };
+                enqueue(INT1, stat, 1);
+                deliver_next();
+            }
+
+            // XA streaming reads at the real disc rate so the decoded audio
+            // feeds the SPU at the correct pitch. Double speed (mode bit 0x80)
+            // halves the per-sector time. Plain data reads stay fast.
+            if (cd.mode & 0x40) {
+                cd.read_delay = (cd.mode & 0x80) ? CDDA_SECTOR_CYCLES / 2
+                                                 : CDDA_SECTOR_CYCLES;
+            } else {
+                cd.read_delay = CDROM_READ_DELAY;
+            }
         }
     }
 

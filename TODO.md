@@ -55,10 +55,19 @@ card address report no device.
   is in: a voice with its PMON bit set scales its pitch step by the previous
   voice's output sample each frame. Volume sweeps are in: the per-voice and main
   volume registers, when in sweep mode (bit15), ramp their level each sample with
-  the ADSR rate tables (linear/exponential, increase/decrease, both phases). Not
-  modeled yet: the SPU IRQ on a sound-RAM address, CD audio routed into reverb,
-  sweeps on the CD and reverb output volumes, and XA-ADPCM streaming audio. Voice
-  mixing uses linear interpolation rather than the hardware Gaussian.
+  the ADSR rate tables (linear/exponential, increase/decrease, both phases).
+  XA-ADPCM streaming audio is in (xa.c, `make xa-test`): when the Setmode XA bit
+  (0x40) is set and a Mode2 subheader marks a sector as audio, the CD read pump
+  decodes its 18 sound groups to 16-bit PCM, resamples from the stream rate (4-bit
+  37800 or 18900 Hz, stereo or mono) to 44100 Hz, and feeds it to spu_cd_audio
+  instead of delivering it to the CPU. The ADPCM predictor history and resampler
+  phase persist across sectors, and XA reads run at the real disc rate (single or
+  double speed) so the SPU CD FIFO does not overrun. Not modeled yet: the SPU IRQ
+  on a sound-RAM address, CD audio routed into reverb, sweeps on the CD and reverb
+  output volumes, 8-bit XA (levels A, decoded as silence for now), Setfilter
+  file/channel selection (every audio sector plays), and the coarser hardware XA
+  interleave timing. Voice mixing uses linear interpolation rather than the
+  hardware Gaussian.
 
 ## Storage
 
@@ -104,8 +113,9 @@ Next up (in order):
     cycles per sector) so the pitch is correct, and the decoded PCM now reaches
     the SDL audio output through spu_cd_audio (see Audio above), so CD music is
     audible in the windowed emulator.
-  Remaining: XA-ADPCM streaming audio is not decoded, and the report-mode INT1
-  cadence is one per sector rather than the hardware's coarser subchannel timing.
+  Remaining: the report-mode INT1 cadence is one per sector rather than the
+  hardware's coarser subchannel timing. (XA-ADPCM streaming audio is now decoded;
+  see the Audio section.)
 
 ## DMA and interrupts
 
