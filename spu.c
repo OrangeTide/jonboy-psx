@@ -6,10 +6,11 @@
 // SPU with 24-voice ADPCM synthesis. Each voice reads 16-byte ADPCM blocks from
 // the 512 KB sound RAM, decodes them, resamples by its pitch, shapes them with an
 // ADSR envelope, and mixes into the output with its per-voice and the main
-// volume. CD (and later XA) audio is mixed in through spu_cd_audio. The mixed
-// stream is produced at 44.1 kHz and queued for the app to play with
-// spu_output_pull. Not modeled yet: reverb, noise voices, pitch modulation, and
-// volume sweeps (fixed volume levels only).
+// volume. Reverb, noise voices, pitch modulation, and per-voice/main volume
+// sweeps are modeled. CD-DA and XA audio is mixed in through spu_cd_audio, scaled
+// by the CD volume; when the SPUCNT CD-reverb bit is set the CD audio is also
+// routed through the reverb work area. The mixed stream is produced at 44.1 kHz
+// and queued for the app to play with spu_output_pull.
 //
 // The ADSR envelope uses the PEOPS/Pete Bernert coarse-plus-fine counter model
 // (see REF/pcsx-redux/src/spu/adsr.cc) with three rate tables.
@@ -633,23 +634,34 @@ mix_frame(void)
         prev = s; // 0 for an inactive voice
     }
 
+    // Pull one CD-audio frame (already scaled by CD volume). When the SPUCNT
+    // CD-reverb bit (0x04) is set the CD audio also feeds the reverb input, so
+    // it must be gathered before reverb_run.
+    int cdl = 0, cdr = 0;
+    if (cd_fifo_r != cd_fifo_w) {
+        unsigned i = (cd_fifo_r & (CD_FIFO_FRAMES - 1)) * 2;
+        cdl = cd_fifo[i];
+        cdr = cd_fifo[i + 1];
+        cd_fifo_r++;
+    }
+    if (load_sized(spu_regs, SPUCNT_OFFSET, 2) & 0x0004) {
+        rev_in_l += cdl;
+        rev_in_r += cdr;
+    }
+
     l = (l * mainl) >> 15;
     r = (r * mainr) >> 15;
 
-    // Reverb: feed the reverb-enabled voices through the work area and add its
-    // output to the mix.
+    // Reverb: feed the reverb-enabled voices, and the CD audio when routed,
+    // through the work area and add its wet output to the mix.
     int rev_l, rev_r;
     reverb_run(rev_in_l, rev_in_r, &rev_l, &rev_r);
     l += rev_l;
     r += rev_r;
 
-    // Mix in one CD-audio frame (already scaled by CD and main volume).
-    if (cd_fifo_r != cd_fifo_w) {
-        unsigned i = (cd_fifo_r & (CD_FIFO_FRAMES - 1)) * 2;
-        l += cd_fifo[i];
-        r += cd_fifo[i + 1];
-        cd_fifo_r++;
-    }
+    // CD audio dry mix, at main volume (matching the voice dry path).
+    l += (cdl * mainl) >> 15;
+    r += (cdr * mainr) >> 15;
 
     if (spu_ring_w - spu_ring_r < SPU_RING_FRAMES) {
         unsigned i = (spu_ring_w & (SPU_RING_FRAMES - 1)) * 2;
@@ -813,16 +825,15 @@ spu_cd_audio(const int16_t *frames, int nframes)
     int cd_enable = spucnt & 0x0001;
     int vl = vol_level((uint16_t)load_sized(spu_regs, CDVOL_L_OFFSET, 2));
     int vr = vol_level((uint16_t)load_sized(spu_regs, CDVOL_R_OFFSET, 2));
-    int ml = vol_level((uint16_t)load_sized(spu_regs, MAINVOL_L_OFFSET, 2));
-    int mr = vol_level((uint16_t)load_sized(spu_regs, MAINVOL_R_OFFSET, 2));
 
+    // Scale by the CD volume only. The mixer applies the main volume to the dry
+    // path and, when the CD-reverb bit is set, routes this CD-volume-level audio
+    // through the reverb work area.
     for (int i = 0; i < nframes; i++) {
         int l = 0, r = 0;
         if (cd_enable) {
             l = ((int)frames[i * 2] * vl) >> 15;
             r = ((int)frames[i * 2 + 1] * vr) >> 15;
-            l = (l * ml) >> 15;
-            r = (r * mr) >> 15;
         }
         if (cd_fifo_w - cd_fifo_r >= CD_FIFO_FRAMES) {
             break; // full: drop

@@ -66,10 +66,13 @@ card address report no device.
   with the Setmode XA-filter bit (0x08) set, only audio sectors whose subheader
   file and channel match the selected stream play, and a non-matching audio sector
   is dropped rather than delivered to the CPU; with the filter off, every audio
-  sector plays. Not modeled yet: the SPU IRQ on a sound-RAM address, CD audio
-  routed into reverb, sweeps on the CD and reverb output volumes, 8-bit XA (levels
-  A, decoded as silence for now), and the coarser hardware XA interleave timing.
-  Voice mixing uses linear interpolation rather than the hardware Gaussian.
+  sector plays. CD audio can be routed through reverb: when the SPUCNT CD-reverb
+  bit (0x04) is set, the CD-volume-scaled CD/XA audio feeds the reverb input
+  alongside the reverb-enabled voices, so its wet output adds to the mix. Not
+  modeled yet: the SPU IRQ on a sound-RAM address, sweeps on the CD and reverb
+  output volumes, 8-bit XA (levels A, decoded as silence for now), and the coarser
+  hardware XA interleave timing. Voice mixing uses linear interpolation rather
+  than the hardware Gaussian.
 
 ## Storage
 

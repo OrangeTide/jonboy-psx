@@ -310,6 +310,63 @@ main(void)
         failures++;
     }
 
+    // ---- CD audio to reverb: SPUCNT bit2 routes CD audio through reverb. ----
+    // Feed the same CD signal twice, with and without the CD-reverb routing, and
+    // confirm the routed pass differs (the reverb wet output is added).
+    int16_t cddry[8192], cdwet[8192];
+    int cd_diff = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int rev_on = pass == 1;
+
+        psx_spu_reset();
+        wr16(MAINVOL_L, 0x7FFF);
+        wr16(MAINVOL_R, 0x7FFF);
+        wr16(0x1B0, 0x7FFF);           // CD volume L
+        wr16(0x1B2, 0x7FFF);           // CD volume R
+
+        uint16_t spucnt = 0x0001;      // CD audio enable
+        if (rev_on) {
+            static const uint16_t hall[32] = {
+                0x007D, 0x005B, 0x6D80, 0x54B8, 0xBED0, 0x0000, 0x0000, 0xBA80,
+                0x5800, 0x5300, 0x04D6, 0x0333, 0x03F0, 0x0227, 0x0374, 0x01EF,
+                0x0334, 0x01B5, 0x0BF0, 0x0C60, 0x0B08, 0x07D0, 0x0AB0, 0x0AE0,
+                0x07A0, 0x0464, 0x0304, 0x0310, 0x0378, 0x038C, 0x8100, 0x8100,
+            };
+            spucnt |= 0x0004 | 0x0080; // CD-reverb routing + reverb master
+            wr16(0x1A2, 0xC000);       // mBASE -> StartAddr word 0x30000
+            wr16(0x184, 0x4000);       // vLOUT
+            wr16(0x186, 0x4000);       // vROUT
+            for (int i = 0; i < 32; i++) {
+                wr16(0x1C0 + i * 2, hall[i]);
+            }
+        }
+        wr16(SPUCNT, spucnt);
+
+        int got = 0;
+        int phase = 0;
+        int16_t *dst = rev_on ? cdwet : cddry;
+        while (got < 4000) {
+            int16_t cdbuf[256 * 2];
+            for (int i = 0; i < 256; i++) {
+                int16_t s = ((phase++ >> 4) & 1) ? 0x4000 : -0x4000; // ~1.4 kHz square
+                cdbuf[i * 2] = s;
+                cdbuf[i * 2 + 1] = s;
+            }
+            spu_cd_audio(cdbuf, 256);
+            tick_samples(256);
+            got += spu_output_pull(dst + got * 2, 256);
+        }
+    }
+    for (int i = 0; i < 4000 * 2; i++) {
+        if (cddry[i] != cdwet[i]) {
+            cd_diff++;
+        }
+    }
+    if (cd_diff == 0) {
+        fprintf(stderr, "FAIL: CD-to-reverb routing did not change the output\n");
+        failures++;
+    }
+
     if (failures) {
         fprintf(stderr, "SPU test: %d failures\n", failures);
         return 1;
@@ -321,5 +378,7 @@ main(void)
     printf("PASS: pitch modulation alters voice 1 (%d/%d samples differ)\n",
            pm_diff, 2000 * 2);
     printf("PASS: volume sweep ramps up (early=%ld late=%ld)\n", early, late);
+    printf("PASS: CD audio routes through reverb (%d/%d samples differ)\n",
+           cd_diff, 4000 * 2);
     return 0;
 }
