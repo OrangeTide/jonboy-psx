@@ -1,4 +1,5 @@
 #include "psio.h"
+#include "lebytes.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,19 +61,6 @@ load_virtual_sd_card(const char *filepath)
     return true;
 }
 
-// Little-endian load of a 1, 2, or 4 byte value from a byte buffer.
-static uint32_t
-le_load(const uint8_t *b, uint32_t off, int size)
-{
-    uint32_t v = 0;
-
-    for (int i = 0; i < size; i++) {
-        v |= (uint32_t)b[off + i] << (i * 8);
-    }
-
-    return v;
-}
-
 uint32_t
 psio_read(uint32_t phys_addr, int size)
 {
@@ -84,7 +72,7 @@ psio_read(uint32_t phys_addr, int size)
             return 0xFFFFFFFF; // no cartridge: an unmapped ROM reads as all-ones
         }
 
-        return le_load(psio.firmware_rom, phys_addr - PSIO_EXP1_BASE, size);
+        return load_sized(psio.firmware_rom, phys_addr - PSIO_EXP1_BASE, size);
     }
 
     return 0;

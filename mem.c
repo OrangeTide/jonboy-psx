@@ -9,6 +9,7 @@
 #include "spu.h"
 #include "cdrom.h"
 #include "timer.h"
+#include "lebytes.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -22,27 +23,6 @@ uint32_t read_hardware_word(uint32_t physical_addr);
 void write_hardware_word(uint32_t physical_addr, uint32_t value);
 
 // Little-endian read/write of a 1, 2, or 4 byte value inside a backing array.
-// The caller has already range-checked that off + size fits.
-static uint32_t
-load_sized(const uint8_t *base, uint32_t off, int size)
-{
-    uint32_t v = 0;
-
-    for (int i = 0; i < size; i++) {
-        v |= (uint32_t)base[off + i] << (i * 8);
-    }
-
-    return v;
-}
-
-static void
-store_sized(uint8_t *base, uint32_t off, uint32_t value, int size)
-{
-    for (int i = 0; i < size; i++) {
-        base[off + i] = (uint8_t)(value >> (i * 8));
-    }
-}
-
 // True if a physical address falls in the PSIO cartridge window in Expansion
 // Region 1. That window holds both the menu-mode device registers (at its base)
 // and the firmware ROM; psio_read/psio_write decode the registers first.

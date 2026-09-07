@@ -22,16 +22,29 @@ conformance : $(BINDIR)/jonboy
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance
+.PHONY: all clean clean-all run fmt conformance amalg
 ## jonboy
+EMU_SRC=cdrom.c cpu.c dma.c gpu.c inject.c main.c mem.c pad.c psio.c rom.c sched.c spu.c timer.c vram.c
 all :: $(BINDIR)/jonboy
 clean ::
 	$(RM) $(BINDIR)/jonboy
 
-$(BINDIR)/jonboy : cdrom.c cpu.c dma.c gpu.c inject.c main.c mem.c pad.c psio.c rom.c sched.c spu.c timer.c vram.c | $(BINDIR)
+$(BINDIR)/jonboy : $(EMU_SRC) | $(BINDIR)
 	$(CC) -o $@ -MMD $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 $(BINDIR)/jonboy : CFLAGS:=$(CFLAGS) $(shell pkg-config --cflags sdl3)
 $(BINDIR)/jonboy : LDLIBS:=$(LDLIBS) $(shell pkg-config --libs sdl3)
+## amalgamation (single self-contained C file)
+# tools/amalgamate.awk inlines every local include once, so $(BINDIR)/jonboy.c
+# is a single file that builds with only the system and SDL3 headers. The
+# jonboy-amalg target compiles it, proving the amalgamation stays self-contained.
+amalg : $(BINDIR)/jonboy-amalg
+all :: $(BINDIR)/jonboy.c
+clean ::
+	$(RM) $(BINDIR)/jonboy.c $(BINDIR)/jonboy-amalg
+$(BINDIR)/jonboy.c : $(EMU_SRC) $(wildcard *.h) tools/amalgamate.awk | $(BINDIR)
+	awk -f tools/amalgamate.awk $(EMU_SRC) > $@
+$(BINDIR)/jonboy-amalg : $(BINDIR)/jonboy.c | $(BINDIR)
+	$(CC) -o $@ $(CFLAGS) $(shell pkg-config --cflags sdl3) $< $(shell pkg-config --libs sdl3)
 ## testcarts
 TESTS=test1 test2 test3 test4 test5 test6 test7 test8 test9
 TEST_CARTS=$(TESTS:%=$(BINDIR)/%.cart)
