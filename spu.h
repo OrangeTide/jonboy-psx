@@ -12,6 +12,14 @@ uint32_t psx_spu_read(uint32_t phys_addr, int size);
 void psx_spu_write(uint32_t phys_addr, uint32_t value, int size);
 void psx_spu_reset(void);
 
+// Advance the SPU by the given CPU cycles, producing 44.1 kHz output frames.
+void psx_spu_tick(uint32_t cycles);
+
+// Sound-RAM transfer port used by DMA channel 4 (and the PIO FIFO). Each call
+// moves one 16-bit word at the current transfer address and advances it.
+void spu_transfer_write(uint16_t v);
+uint16_t spu_transfer_read(void);
+
 // CD audio input. The CD-ROM controller pushes decoded CD-DA (and, later, XA)
 // PCM here as interleaved 16-bit stereo frames. The SPU mixes this into its
 // output, scaled by the CD volume registers. No audio backend exists yet, so

@@ -33,16 +33,22 @@ card address report no device.
 
 ## Audio
 
-- [~] add sound support. The audio output backend is in: main.c opens an SDL3
-  44.1 kHz stereo output stream and drains the SPU each frame; spu.c owns an
-  output ring and mixes CD-DA in through spu_cd_audio, scaled by the CD input
-  volume (0x1F801DB0/DB2), the main volume (0x1F801D80/D82), and gated by the
-  SPUCNT CD-enable bit. Unit tested (test_spu.c, `make spu-test`). Headless and
-  the tests build without SDL: spu.c has no SDL dependency, the app owns the
-  device. So CD-DA music now plays. Still stubbed: the 24 ADPCM voice channels
-  are not synthesized (no ADSR, pitch, or SPU-RAM sample playback), so sequenced
-  game music and sound effects are still silent, and reverb and volume sweeps are
-  not modeled. XA-ADPCM streaming audio is also not decoded yet.
+- [~] add sound support. Output backend and voice synthesis are in. main.c opens
+  an SDL3 44.1 kHz stereo stream and drains the SPU each frame; spu.c owns a 512
+  KB sound RAM, an output ring, and a 44.1 kHz mixer (psx_spu_tick, one frame per
+  768 CPU cycles). The 24 voices decode ADPCM blocks from sound RAM, resample by
+  their pitch (linear interpolation), shape with an ADSR envelope (the PEOPS
+  coarse/fine counter model, see REF/pcsx-redux/src/spu/adsr.cc), loop on the
+  block flags, set ENDX, and mix with per-voice and main volume. Key on/off
+  (0x1F801D88/8C) start and release voices. Sound RAM is filled by DMA channel 4
+  (dma.c) and the PIO transfer FIFO (0x1F801DA6/DA8). CD-DA is mixed in through
+  spu_cd_audio, scaled by the CD (0x1F801DB0/DB2) and main volume and gated by
+  the SPUCNT CD-enable bit. Unit tested (test_spu.c, `make spu-test`: CD mix and
+  an ADPCM voice); spu.c has no SDL dependency so headless and the tests build
+  without it. So sequenced music and sound effects now play. Not modeled yet:
+  reverb, noise voices (NON), pitch modulation (PMON), volume sweep envelopes
+  (fixed levels only), the SPU IRQ on a sound-RAM address, and XA-ADPCM streaming
+  audio. Voice mixing uses linear interpolation rather than the hardware Gaussian.
 
 ## Storage
 

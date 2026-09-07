@@ -4,6 +4,7 @@
 #include "mem.h"
 #include "psio.h"
 #include "cdrom.h"
+#include "spu.h"
 #include <string.h>
 
 DMA_Channel dma_channels[7];
@@ -76,10 +77,8 @@ dma_psio_read(int channel)
     }
 }
 
-// SPU DMA (channel 4): the SPU sound RAM is not modeled yet, so a write to the
-// SPU just consumes the words and a read back fills RAM with zeros. Completing
-// the transfer and raising the SPU interrupt is what unblocks a game that waits
-// on the SPU event (HwSPU) after kicking a sound upload.
+// SPU DMA (channel 4): move sample data between main RAM and the SPU sound RAM
+// at the SPU transfer address. Each 32-bit word is two 16-bit sound-RAM words.
 static void
 dma_spu(int channel)
 {
@@ -95,11 +94,18 @@ dma_spu(int channel)
         words = block_size;
     }
 
-    // Direction is CHCR bit 0: 1 = RAM to device (a sound upload). Only a read
-    // back needs to touch RAM, and it has nothing real to return yet.
-    if ((chcr & 1) == 0) {
+    // Direction is CHCR bit 0: 1 = RAM to device (a sound upload).
+    if (chcr & 1) {
         for (uint32_t i = 0; i < words; i++) {
-            MEM_WRITE_32((madr + i * 4) & RAM_MASK, 0);
+            uint32_t w = MEM_READ_32((madr + i * 4) & RAM_MASK);
+            spu_transfer_write((uint16_t)w);
+            spu_transfer_write((uint16_t)(w >> 16));
+        }
+    } else {
+        for (uint32_t i = 0; i < words; i++) {
+            uint16_t a = spu_transfer_read();
+            uint16_t b = spu_transfer_read();
+            MEM_WRITE_32((madr + i * 4) & RAM_MASK, a | ((uint32_t)b << 16));
         }
     }
 }
