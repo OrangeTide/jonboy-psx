@@ -124,6 +124,11 @@ static struct {
     int data_active;        // the CPU asked for the sector (request bit)
     int sector_started;     // the request cursor has been positioned this sector
     int xa_audio;           // the last loaded sector was XA audio, sent to the SPU
+
+    // XA filter (Setfilter): when the Setmode XA-filter bit (0x08) is set, only
+    // XA audio sectors whose subheader file and channel match these play.
+    uint8_t filter_file;
+    uint8_t filter_channel;
 } cd;
 
 static int
@@ -524,10 +529,18 @@ load_sector(void)
     // Mode2 subheader marks this sector as audio (submode bit 2, raw byte 18),
     // the drive decodes it and sends the audio to the SPU rather than delivering
     // it to the CPU as a data sector. The coding byte (raw byte 19) selects the
-    // rate, stereo, and bit depth. File/channel filtering (Setfilter) is not yet
-    // applied, so every audio sector plays.
+    // rate, stereo, and bit depth. When the XA-filter bit (0x08) is set, only
+    // sectors whose subheader file (raw byte 16) and channel (raw byte 17) match
+    // the Setfilter selection play; a non-matching audio sector is dropped, not
+    // delivered to the CPU. With the filter off, every audio sector plays.
     if ((cd.mode & 0x40) && (raw[18] & 0x04)) {
-        xa_decode_sector(raw + 24, raw[19]);
+        int match = 1;
+        if (cd.mode & 0x08) {
+            match = raw[16] == cd.filter_file && raw[17] == cd.filter_channel;
+        }
+        if (match) {
+            xa_decode_sector(raw + 24, raw[19]);
+        }
         cd.xa_audio = 1;
         return;
     }
@@ -682,7 +695,14 @@ run_command(uint8_t cmd)
         enqueue(INT3, stat, 1);
         break;
 
-    case 0x0D: // Setfilter
+    case 0x0D: // Setfilter (file, channel): select the XA stream to play
+        if (cd.param_count >= 2) {
+            cd.filter_file = cd.param_fifo[0];
+            cd.filter_channel = cd.param_fifo[1];
+        }
+        enqueue(INT3, stat, 1);
+        break;
+
     case 0x1E: // GetToc
         enqueue(INT3, stat, 1);
         break;

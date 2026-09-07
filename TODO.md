@@ -62,12 +62,14 @@ card address report no device.
   37800 or 18900 Hz, stereo or mono) to 44100 Hz, and feeds it to spu_cd_audio
   instead of delivering it to the CPU. The ADPCM predictor history and resampler
   phase persist across sectors, and XA reads run at the real disc rate (single or
-  double speed) so the SPU CD FIFO does not overrun. Not modeled yet: the SPU IRQ
-  on a sound-RAM address, CD audio routed into reverb, sweeps on the CD and reverb
-  output volumes, 8-bit XA (levels A, decoded as silence for now), Setfilter
-  file/channel selection (every audio sector plays), and the coarser hardware XA
-  interleave timing. Voice mixing uses linear interpolation rather than the
-  hardware Gaussian.
+  double speed) so the SPU CD FIFO does not overrun. Setfilter (0x0D) is honored:
+  with the Setmode XA-filter bit (0x08) set, only audio sectors whose subheader
+  file and channel match the selected stream play, and a non-matching audio sector
+  is dropped rather than delivered to the CPU; with the filter off, every audio
+  sector plays. Not modeled yet: the SPU IRQ on a sound-RAM address, CD audio
+  routed into reverb, sweeps on the CD and reverb output volumes, 8-bit XA (levels
+  A, decoded as silence for now), and the coarser hardware XA interleave timing.
+  Voice mixing uses linear interpolation rather than the hardware Gaussian.
 
 ## Storage
 

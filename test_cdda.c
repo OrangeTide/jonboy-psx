@@ -26,6 +26,9 @@ uint8_t system_ram[2 * 1024 * 1024];
 static int16_t cap_pcm[CDDA_FRAMES * 2];
 static int cap_have;
 static int cap_calls;
+// First left sample of each spu_cd_audio call, so the XA filter test can tell
+// which sectors reached the SPU.
+static int16_t cap_first_left[64];
 
 void
 spu_cd_audio(const int16_t *frames, int nframes)
@@ -33,6 +36,9 @@ spu_cd_audio(const int16_t *frames, int nframes)
     if (cap_calls == 0 && nframes == CDDA_FRAMES) {
         memcpy(cap_pcm, frames, sizeof cap_pcm);
         cap_have = 1;
+    }
+    if (cap_calls < 64 && nframes > 0) {
+        cap_first_left[cap_calls] = frames[0];
     }
     cap_calls++;
 }
@@ -42,6 +48,32 @@ static uint8_t
 pat(long x)
 {
     return (uint8_t)(((uint32_t)x * 2654435761u) >> 24);
+}
+
+// Write one Mode2 XA audio sector: a subheader marking it audio (form2) with the
+// given file and channel, 4-bit stereo 37800 Hz coding, and filter-0 ADPCM data
+// (every header byte 0, every data byte 0x71) so the decode is a constant left
+// 0x1000 and right 0x7000.
+static void
+write_xa_sector(FILE *f, uint8_t file, uint8_t chan)
+{
+    uint8_t s[RAW_SECTOR];
+    memset(s, 0, sizeof s);
+
+    s[16] = file;   // subheader: file number
+    s[17] = chan;   // channel number
+    s[18] = 0x24;   // submode: audio (0x04) + form2 (0x20)
+    s[19] = 0x01;   // coding: 4-bit, 37800 Hz, stereo
+    s[20] = file;   // subheader copy
+    s[21] = chan;
+    s[22] = 0x24;
+    s[23] = 0x01;
+
+    for (int g = 0; g < 18; g++) {
+        memset(s + 24 + g * 128 + 16, 0x71, 112); // headers stay 0
+    }
+
+    fwrite(s, 1, RAW_SECTOR, f);
 }
 
 static void cd_index(uint8_t i) { psx_cdrom_write(CDROM_BASE + 0, i, 1); }
@@ -154,5 +186,111 @@ main(void)
 
     remove(bin);
     remove(cue);
+
+    // ---- XA filter (Setfilter file/channel selection) ------------------------
+    // Build a data track of four XA audio sectors with different file/channel
+    // subheaders, enable XA + the XA filter, select one file/channel, read, and
+    // check that only the matching sectors reached the SPU.
+    const char *xbin = "_out/_xa.bin";
+    const char *xcue = "_out/_xa.cue";
+
+    struct { uint8_t file, chan; } secs[4] = {
+        { 1, 0 },  // match
+        { 1, 1 },  // wrong channel
+        { 1, 0 },  // match
+        { 2, 0 },  // wrong file
+    };
+
+    f = fopen(xbin, "wb");
+    if (!f) { perror(xbin); return 1; }
+    for (int i = 0; i < 4; i++) {
+        write_xa_sector(f, secs[i].file, secs[i].chan);
+    }
+    fclose(f);
+
+    f = fopen(xcue, "w");
+    if (!f) { perror(xcue); return 1; }
+    fprintf(f, "FILE \"_xa.bin\" BINARY\n");
+    fprintf(f, "  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+    fclose(f);
+
+    psx_cdrom_reset();
+    if (cdrom_mount(xcue) != 0) {
+        fprintf(stderr, "mount failed\n");
+        return 1;
+    }
+
+    cap_calls = 0;
+    memset(cap_first_left, 0, sizeof cap_first_left);
+
+    cd_param(0x00); cd_param(0x02); cd_param(0x00); // Setloc 00:02:00 = LBA 0
+    cd_cmd(0x02);
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    cd_param(0x40 | 0x08);   // Setmode: XA-ADPCM + XA-filter
+    cd_cmd(0x0E);
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    cd_param(0x01); cd_param(0x00); // Setfilter file 1, channel 0
+    cd_cmd(0x0D);
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    cd_cmd(0x06);            // ReadN from LBA 0
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    // Stream past all four sectors (real disc rate under XA mode).
+    for (int i = 0; i < 6; i++) {
+        psx_cdrom_tick(500000);
+    }
+
+    if (cap_calls != 2) {
+        fprintf(stderr, "FAIL: XA filter passed %d sectors, expected 2\n", cap_calls);
+        return 1;
+    }
+    if (cap_first_left[0] != 0x1000 || cap_first_left[1] != 0x1000) {
+        fprintf(stderr, "FAIL: XA filtered audio decoded wrong (%d, %d)\n",
+                cap_first_left[0], cap_first_left[1]);
+        return 1;
+    }
+    printf("PASS: XA filter played only the 2 matching sectors\n");
+
+    // With the filter off, all four audio sectors should play.
+    psx_cdrom_reset();
+    if (cdrom_mount(xcue) != 0) {
+        fprintf(stderr, "mount failed\n");
+        return 1;
+    }
+    cap_calls = 0;
+
+    cd_param(0x00); cd_param(0x02); cd_param(0x00);
+    cd_cmd(0x02);
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    cd_param(0x40);          // Setmode: XA-ADPCM, no filter
+    cd_cmd(0x0E);
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    cd_cmd(0x06);            // ReadN from LBA 0
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    for (int i = 0; i < 6; i++) {
+        psx_cdrom_tick(500000);
+    }
+
+    if (cap_calls != 4) {
+        fprintf(stderr, "FAIL: filter off played %d sectors, expected 4\n", cap_calls);
+        return 1;
+    }
+    printf("PASS: XA filter off plays all audio sectors\n");
+
+    remove(xbin);
+    remove(xcue);
     return 0;
 }
