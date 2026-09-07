@@ -61,11 +61,18 @@ card address report no device.
   left the target register stale and corrupted a copy loop interrupted right
   after a load.
 - [ ] Final Fantasy Tactics now boots and runs its own startup past SPU init,
-  but crashes ~260M steps in: an interrupt taken during a game copy loop
-  dispatches to a handler descriptor whose ISR pointer references data, not
-  code. The bad bytes come from an earlier data-setup step (CD overlay load,
-  GPU-DMA read back, or timing), so the divergence needs a reference-emulator
-  trace to pin down.
+  but crashes ~260M steps in. Investigated in depth: an interrupt taken during a
+  game memcpy loop (~0x80014440) dispatches through an interrupt-handler pointer
+  that points into a game DATA buffer (~0x8006B5A0, filled with data by a BIOS
+  memcpy at 0xBFC02B68), so it runs data as code and jumps to garbage. The bad
+  pointer is pre-existing: the crash lands the same way whether the triggering
+  interrupt is TIMER2 or DMA (only which interrupt fires shifts with timing), so
+  the DMA-completion work above did not cause it, it only let the game run far
+  enough to reach it. The handler pointer is corrupt before this point; finding
+  where it first goes wrong needs a reference trace (REF/pcsx-redux) to diff RAM
+  and register state at the divergence. Debug recipe: an env-gated bad-PC halt
+  plus a recent-PC ring in step_cpu, a byte-range memory-write watch in mem.c,
+  and objdump -b binary -m mips:3000 -EL on a RAM dump.
 - EXP1 boot hook (verified, reused by the loader below): psio.c presents the
   cartridge as a ROM in Expansion Region 1. The scph5501 BIOS checks the pre-boot
   signature ("Licensed by Sony Computer Entertainment Inc.") at 0x1F000084 and,
