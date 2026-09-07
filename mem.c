@@ -43,15 +43,13 @@ store_sized(uint8_t *base, uint32_t off, uint32_t value, int size)
     }
 }
 
-// True if a physical address falls in one of the PSIO cartridge windows: the
-// firmware ROM (Expansion Region 1) or the device registers (Expansion
-// Region 2). The register window overlaps the general MMIO block, so this is
-// tested first.
+// True if a physical address falls in the PSIO cartridge window in Expansion
+// Region 1. That window holds both the menu-mode device registers (at its base)
+// and the firmware ROM; psio_read/psio_write decode the registers first.
 static int
 in_psio_region(uint32_t a)
 {
-    return (a >= PSIO_EXP1_BASE && a < PSIO_EXP1_BASE + PSIO_EXP1_SIZE)
-           || (a >= PSIO_REG_BASE && a < PSIO_REG_BASE + PSIO_REG_SIZE);
+    return a >= PSIO_EXP1_BASE && a < PSIO_EXP1_BASE + PSIO_EXP1_SIZE;
 }
 
 // Decode a physical address to its region and read a sized value. Sub-word

@@ -56,72 +56,93 @@ load_virtual_sd_card(const char *filepath)
     }
 
     psio.sd_card_file = f;
-    psio.status_reg = PSIO_STATUS_READY; // a freshly mounted card is idle
+    // A freshly mounted card is idle and ready to take a command.
+    psio.status_reg = PSIO_STAT_TX_FREE | PSIO_STAT_SD_INSERTED;
+    psio.tx_count = 0;
+    psio.fifo_ptr = psio.fifo_count = psio.stream_remaining = 0;
 
     return true;
 }
 
-// Position the mounted image at the current LBA. Both the FIFO read command and
-// a DMA channel-3 transfer stream from wherever the file pointer sits, so the
-// LBA write and any read must agree on this seek. Returns 0 on success.
-static int
-psio_seek_to_lba(void)
-{
-    if (!psio.sd_card_file) {
-        return -1;
-    }
-
-    long off = (long)((uint64_t)psio.lba * PSIO_SECTOR_SIZE);
-
-    return fseek(psio.sd_card_file, off, SEEK_SET);
-}
-
-// Read one sector at the current LBA into the FIFO, then advance the LBA so
-// sequential reads walk the image. Sets DATA on success or ERROR on failure.
+// Stage the next chunk of the active read into the FIFO buffer, refilling only
+// when it has been drained. Clears RX_READY once the whole read is delivered.
 static void
-psio_read_sector_to_fifo(void)
+psio_refill_staging(void)
 {
+    if (psio.fifo_count > 0) {
+        return; // still bytes to hand out
+    }
+
+    if (psio.stream_remaining == 0 || !psio.sd_card_file) {
+        psio.status_reg &= ~PSIO_STAT_RX_READY;
+        return;
+    }
+
+    uint32_t chunk = psio.stream_remaining;
+
+    if (chunk > sizeof(psio.fifo_buffer)) {
+        chunk = sizeof(psio.fifo_buffer);
+    }
+
+    size_t got = fread(psio.fifo_buffer, 1, chunk, psio.sd_card_file);
+
+    // Zero-fill a short read (EOF) so the transfer size is still honored.
+    if (got < chunk) {
+        memset(psio.fifo_buffer + got, 0, chunk - got);
+    }
+
     psio.fifo_ptr = 0;
-    psio.fifo_count = 0;
-    psio.status_reg &= ~(PSIO_STATUS_DATA | PSIO_STATUS_ERROR);
-
-    if (psio_seek_to_lba() != 0) {
-        psio.status_reg |= PSIO_STATUS_ERROR;
-        return;
-    }
-
-    size_t got = fread(psio.fifo_buffer, 1, PSIO_SECTOR_SIZE, psio.sd_card_file);
-
-    if (got == 0) {
-        psio.status_reg |= PSIO_STATUS_ERROR; // read past the end of the image
-        return;
-    }
-
-    // Zero-fill a short trailing sector so reads past EOF stay defined.
-    if (got < PSIO_SECTOR_SIZE) {
-        memset(psio.fifo_buffer + got, 0, PSIO_SECTOR_SIZE - got);
-    }
-
-    psio.fifo_count = PSIO_SECTOR_SIZE;
-    psio.lba++;
-    psio.status_reg |= PSIO_STATUS_DATA;
+    psio.fifo_count = chunk;
+    psio.stream_remaining -= chunk;
+    psio.status_reg |= PSIO_STAT_RX_READY;
 }
 
+// Run the command packet assembled in tx_words. The header holds the id, flags,
+// and block count; word 1 is the LBA; word 2 is an XOR checksum of the first
+// two. A bad checksum or unknown id is ignored so a stray strobe cannot wedge
+// the device.
 void
 process_psio_command(void)
 {
-    switch (psio.command_reg) {
-    case PSIO_CMD_READ_SECTOR:
-        psio_read_sector_to_fifo();
-        break;
+    uint32_t header = psio.tx_words[0];
+    uint32_t lba    = psio.tx_words[1];
+    uint32_t check  = psio.tx_words[2];
 
-    case PSIO_CMD_NOP:
-    default:
-        // Unknown or probe commands complete with no side effects.
-        break;
+    psio.tx_count = 0;
+    psio.status_reg |= PSIO_STAT_TX_FREE;
+
+    if (check != (header ^ lba)) {
+        return; // malformed packet, checksum mismatch
     }
 
-    psio.status_reg |= PSIO_STATUS_READY; // the command has been handled
+    uint32_t cmd    = header & 0xFF;
+    uint32_t flags  = (header >> 8) & 0xFF;
+    uint32_t blocks = (header >> 16) & 0xFFFF;
+
+    if (blocks == 0) {
+        blocks = 1;
+    }
+
+    if (cmd != PSIO_CMD_READ_SECTOR || !psio.sd_card_file) {
+        return;
+    }
+
+    // Seek the image to the requested sector. A polling read stages data into
+    // the FIFO; a DMA read leaves the file positioned for channel 3 to stream.
+    if (fseek(psio.sd_card_file, (long)((uint64_t)lba * PSIO_SECTOR_SIZE),
+              SEEK_SET) != 0) {
+        return;
+    }
+
+    psio.fifo_ptr = psio.fifo_count = 0;
+
+    if (flags & PSIO_FLAG_DMA) {
+        psio.stream_remaining = 0; // DMA channel 3 reads straight from the file
+        return;
+    }
+
+    psio.stream_remaining = blocks * PSIO_SECTOR_SIZE;
+    psio_refill_staging();
 }
 
 // Little-endian load of a 1, 2, or 4 byte value from a byte buffer.
@@ -140,7 +161,36 @@ le_load(const uint8_t *b, uint32_t off, int size)
 uint32_t
 psio_read(uint32_t phys_addr, int size)
 {
-    // Firmware ROM window (Expansion Region 1).
+    // The device registers sit at the base of the window and shadow the first
+    // bytes of the ROM, so they are decoded before the ROM fallback below.
+    switch (phys_addr) {
+    case PSIO_REG_DATA: { // pop the next word/bytes of streamed data
+        psio_refill_staging();
+
+        if (psio.fifo_count >= (uint32_t)size
+                && psio.fifo_ptr + (uint32_t)size <= sizeof(psio.fifo_buffer)) {
+            uint32_t data = le_load(psio.fifo_buffer, psio.fifo_ptr, size);
+            psio.fifo_ptr += (uint32_t)size;
+            psio.fifo_count -= (uint32_t)size;
+
+            if (psio.fifo_count == 0 && psio.stream_remaining == 0) {
+                psio.status_reg &= ~PSIO_STAT_RX_READY; // whole read delivered
+            }
+
+            return data;
+        }
+
+        return 0; // no data staged
+    }
+
+    case PSIO_REG_STATUS:
+        return psio.status_reg;
+
+    case PSIO_REG_IRQ:
+        return psio.irq_reg;
+    }
+
+    // Firmware ROM window (the rest of Expansion Region 1).
     if (phys_addr >= PSIO_EXP1_BASE && phys_addr < PSIO_EXP1_BASE + PSIO_EXP1_SIZE) {
         if (!psio.firmware_rom) {
             return 0xFFFFFFFF; // unmapped ROM reads as all-ones
@@ -149,48 +199,34 @@ psio_read(uint32_t phys_addr, int size)
         return le_load(psio.firmware_rom, phys_addr - PSIO_EXP1_BASE, size);
     }
 
-    // Device registers (Expansion Region 2).
-    switch (phys_addr) {
-    case PSIO_REG_STATUS:
-        return psio.status_reg;
-
-    case PSIO_REG_FIFO: // pop from the SD data FIFO
-        if (psio.fifo_count >= (uint32_t)size
-                && psio.fifo_ptr + (uint32_t)size <= sizeof(psio.fifo_buffer)) {
-            uint32_t data = le_load(psio.fifo_buffer, psio.fifo_ptr, size);
-            psio.fifo_ptr += (uint32_t)size;
-            psio.fifo_count -= (uint32_t)size;
-
-            if (psio.fifo_count == 0) {
-                psio.status_reg &= ~PSIO_STATUS_DATA; // FIFO drained
-            }
-
-            return data;
-        }
-
-        return 0; // FIFO empty
-
-    default:
-        return 0;
-    }
+    return 0;
 }
 
 void
 psio_write(uint32_t phys_addr, uint32_t value, int size)
 {
-    (void)size; // device registers are word-oriented for now
+    (void)size; // command and data words are 32-bit
 
     switch (phys_addr) {
-    case PSIO_REG_STATUS: // command register on the write side
-        psio.command_reg = value;
+    case PSIO_REG_DATA: // push one word of the command packet
+        if (psio.tx_count < 3) {
+            psio.tx_words[psio.tx_count++] = value;
+        }
+
+        if (psio.tx_count >= 3) {
+            psio.status_reg &= ~PSIO_STAT_TX_FREE; // packet full, awaiting strobe
+        }
+        break;
+
+    case PSIO_REG_CMD: // strobe: run the assembled packet
         process_psio_command();
         break;
 
-    case PSIO_REG_LBA: // sector address
-        psio.lba = value;
-        // Seek now so a DMA channel-3 read (which streams from the current file
-        // position) lands on this sector without a separate read command.
-        psio_seek_to_lba();
+    case PSIO_REG_IRQ:
+        // Acknowledge/interrupt latch. Kept as a plain store for now: the
+        // streaming FIFO manages RX_READY itself, so the ack has no side effect
+        // until MENU.SYS pins down the real interrupt semantics.
+        psio.irq_reg = value;
         break;
 
     default:

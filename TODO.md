@@ -39,13 +39,20 @@ handshake (0x01 poll, 0x42 read, 0x5A sync, then the per-device payload).
 - [ ] add cd-rom support. cdrom.c implements the register interface and command
   handshake but always reports "no disc". Remaining: load a disc image (cue/bin
   or iso), map LBA to sectors, and deliver sector data.
-- [~] add PSIO support. psio.c mounts a raw image file (load_virtual_sd_card),
-  and the register interface now decodes commands: a LBA write seeks the image,
-  the READ_SECTOR command loads a 2048-byte sector into the FIFO (auto-advancing
-  the LBA), and the status register reports READY / DATA / ERROR. DMA channel 3
-  still streams bulk words from the seeked position. Protocol is documented in
-  psio.h (PSIO_CMD_* / PSIO_STATUS_*).
-  - [ ] richer command set as the firmware needs it (multi-sector read, status
-    query, mount/eject), driven by what the actual PSIO firmware issues
+- [~] add PSIO support. psio.c models the menu-mode parallel-port interface in
+  Expansion Region 1 (0x1F000000): a data-port FIFO (0x00), status/command
+  (0x04), and an IRQ latch (0x08), with status bits RX_READY / TX_FREE / BUSY /
+  SD_INSERTED. Commands are 12-byte packets (id, flags, block count, LBA, XOR
+  checksum) streamed into the data port then strobed; READ_SECTOR streams the
+  requested blocks back through the FIFO, or leaves the file positioned for DMA
+  channel 3 when the DMA flag is set. Protocol is documented in psio.h.
+  Registers were derived from research notes, not yet verified against real
+  firmware; see the caveats below.
+  - [ ] verify the register map, packet format, and IRQ/ack semantics against
+    the real ps-iowned / lite_menu source (current model is doc-based)
+  - [ ] boot the REF/loader-beta-test MENU.SYS (needs the EXP1 boot ROM path and
+    correct polling-loop timing; instant transfers can hang the firmware)
+  - [ ] game-execution path: trap the stock CD-ROM registers (0x1F801800-3) and
+    serve sectors from the ISO the menu selected
   - [ ] read from FAT32 image (parse the filesystem, not just a raw image)
   - [ ] read from a hosted directory
