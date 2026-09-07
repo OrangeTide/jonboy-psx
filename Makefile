@@ -44,5 +44,19 @@ $(BINDIR)/%.o : %.asm | $(BINDIR)
 	mipsel-unknown-elf-as -march=r3000 -mabi=32 -o $@ $<
 $(BINDIR)/%.elf : $(BINDIR)/%.o
 	mipsel-unknown-elf-ld -Ttext 0x0 -e __start -o $@ $<
+## loader (guest menu program, a PS-EXE sideloaded at kernel-up)
+LOADER_CC=mipsel-unknown-elf-gcc
+LOADER_CFLAGS=-march=r3000 -mabi=32 -G0 -fno-pic -mno-abicalls -O2 -ffreestanding -Wall
+LOADER_SRC=loader/crt0.s loader/main.c
+all :: $(BINDIR)/loader.exe
+clean ::
+	$(RM) $(BINDIR)/loader.exe $(BINDIR)/loader.elf $(BINDIR)/loader.bin $(BINDIR)/mkexe
+$(BINDIR)/mkexe : loader/mkexe.c | $(BINDIR)
+	$(CC) -O2 -o $@ $<
+$(BINDIR)/loader.elf : $(LOADER_SRC) loader/loader.ld | $(BINDIR)
+	$(LOADER_CC) $(LOADER_CFLAGS) -nostdlib -T loader/loader.ld -o $@ $(LOADER_SRC)
+$(BINDIR)/loader.exe : $(BINDIR)/loader.elf $(BINDIR)/mkexe
+	mipsel-unknown-elf-objcopy -O binary $< $(BINDIR)/loader.bin
+	$(BINDIR)/mkexe $(BINDIR)/loader.bin $@
 ## end
 -include $(wildcard *.d)
