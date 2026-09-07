@@ -2,12 +2,14 @@
 
 ## controller port
 
-Current state: pad.c answers every port access with 0xFF, so no device is
-acknowledged yet. Implementing any type below means driving the SIO transfer
-handshake (0x01 poll, 0x42 read, 0x5A sync, then the per-device payload).
+Current state: a digital pad in slot 1 works. pad.c drives the SIO0 transfer
+(0x01 address, 0x42 read, 0x5A, two button bytes) and pulses the acknowledge
+interrupt (IRQ_PAD) after each byte but the last. Buttons come from pad_buttons,
+active low, driven by the host keyboard in the SDL window. Slot 2 and the memory
+card address report no device.
 
-- [ ] support the 4 main controller port types:
-  - [ ] Standard Digital Pad ID: 0x41
+- [~] support the 4 main controller port types:
+  - [x] Standard Digital Pad ID: 0x41
   - [ ] Standard Analog Flightstick ID: 0x53
   - [ ] DualShock Analog Pad ID: 0x73 (analog mode). Reports 0x41 in digital
     mode; the ANALOG button toggles between the two, so handle both IDs.

@@ -10,9 +10,31 @@
 #include "gpu.h"
 #include "inject.h"
 #include "mem.h"
+#include "pad.h"
 #include "psio.h"
 #include "vram.h"
 #include "rom.h"
+
+// Map a host key to a digital pad button bit, or 0 if it is not a pad key.
+static uint16_t
+pad_bit_for_key(SDL_Keycode key)
+{
+    switch (key) {
+    case SDLK_UP:        return PAD_BTN_UP;
+    case SDLK_DOWN:      return PAD_BTN_DOWN;
+    case SDLK_LEFT:      return PAD_BTN_LEFT;
+    case SDLK_RIGHT:     return PAD_BTN_RIGHT;
+    case SDLK_Z:         return PAD_BTN_CROSS;
+    case SDLK_X:         return PAD_BTN_CIRCLE;
+    case SDLK_A:         return PAD_BTN_SQUARE;
+    case SDLK_S:         return PAD_BTN_TRIANGLE;
+    case SDLK_RETURN:    return PAD_BTN_START;
+    case SDLK_RSHIFT:    return PAD_BTN_SELECT;
+    case SDLK_Q:         return PAD_BTN_L1;
+    case SDLK_W:         return PAD_BTN_R1;
+    default:             return 0;
+    }
+}
 
 // Boot options shared with the SDL run function (which SDL_RunApp calls with a
 // fixed signature, so they cannot be passed as arguments).
@@ -172,6 +194,16 @@ jonboy_runapp(int argc, char *argv[])
                     app.is_running = false;
                 } else if (event.key.key == SDLK_F1) {
                     app.full_vram_view = !app.full_vram_view;
+                }
+
+                uint16_t bit = pad_bit_for_key(event.key.key);
+                if (bit) {
+                    pad_buttons &= ~bit; // active low: pressed clears the bit
+                }
+            } else if (event.type == SDL_EVENT_KEY_UP) {
+                uint16_t bit = pad_bit_for_key(event.key.key);
+                if (bit) {
+                    pad_buttons |= bit; // released sets the bit
                 }
             }
         }
