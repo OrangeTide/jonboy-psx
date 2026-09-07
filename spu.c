@@ -67,6 +67,16 @@ typedef struct {
 
 static Voice voices[NUM_VOICES];
 
+// A volume that can be a fixed level or a sweep envelope. The sweep advances one
+// step per output sample using the same rate tables as the ADSR.
+typedef struct {
+    int level;   // current level, -0x8000..0x7FFF
+    int counter; // fine counter
+} Sweep;
+
+static Sweep voice_sweep[NUM_VOICES][2]; // [voice][0=L,1=R]
+static Sweep main_sweep[2];
+
 // ADSR rate tables, generated once. The step values double every four rates.
 static int32_t env_denom[128];
 static int32_t env_num_inc[128];
@@ -173,6 +183,8 @@ psx_spu_reset(void)
     memset(spu_ram, 0, sizeof spu_ram);
     memset(voices, 0, sizeof voices);
     memset(&rvb, 0, sizeof rvb);
+    memset(voice_sweep, 0, sizeof voice_sweep);
+    memset(main_sweep, 0, sizeof main_sweep);
     spu_noise_val = 0;
     spu_noise_count = 0;
     spu_xfer_addr = 0;
@@ -196,11 +208,62 @@ clamp16(int v)
 }
 
 // A volume register is a signed level in fixed mode; the sweep mode (bit15) is
-// not modeled, so approximate it at unity.
+// not modeled here, so approximate it at unity. Used for the CD and reverb
+// output volumes; the voice and main volumes use vol_tick for real sweeps.
 static int
 vol_level(uint16_t v)
 {
     return (v & 0x8000) ? 0x7FFF : (int16_t)v;
+}
+
+static int
+vol_tick(uint16_t reg, Sweep *sw)
+{
+    if (!(reg & 0x8000)) {
+        // Fixed volume: track it so a later sweep continues from here.
+        sw->level = (int16_t)reg;
+        sw->counter = 0;
+        return sw->level;
+    }
+
+    int rate = reg & 0x7F;
+    int exp = (reg >> 14) & 1;
+    int dec = (reg >> 13) & 1;
+    int neg = (reg >> 12) & 1; // sweep phase: 0 = positive, 1 = negative
+    int idx;
+
+    if (!dec) { // increase toward the phase extreme
+        int r = rate;
+        if (exp && sw->level >= 0x6000) {
+            r += 8;
+        }
+        idx = r > 127 ? 127 : r;
+        if (++sw->counter >= env_denom[idx]) {
+            sw->counter = 0;
+            sw->level += neg ? -env_num_inc[idx] : env_num_inc[idx];
+        }
+        if (!neg && sw->level > 0x7FFF) {
+            sw->level = 0x7FFF;
+        }
+        if (neg && sw->level < -0x8000) {
+            sw->level = -0x8000;
+        }
+    } else { // decrease toward zero
+        idx = rate > 127 ? 127 : rate;
+        if (++sw->counter >= env_denom[idx]) {
+            sw->counter = 0;
+            int mag = sw->level < 0 ? -sw->level : sw->level;
+            int step = exp ? (env_num_dec[idx] * mag) >> 15 : env_num_dec[idx];
+            sw->level += neg ? -step : step;
+        }
+        if (!neg && sw->level < 0) {
+            sw->level = 0;
+        }
+        if (neg && sw->level > 0) {
+            sw->level = 0;
+        }
+    }
+    return sw->level;
 }
 
 static void
@@ -542,8 +605,8 @@ reverb_run(int in_l, int in_r, int *out_l, int *out_r)
 static void
 mix_frame(void)
 {
-    int mainl = vol_level((uint16_t)load_sized(spu_regs, MAINVOL_L_OFFSET, 2));
-    int mainr = vol_level((uint16_t)load_sized(spu_regs, MAINVOL_R_OFFSET, 2));
+    int mainl = vol_tick((uint16_t)load_sized(spu_regs, MAINVOL_L_OFFSET, 2), &main_sweep[0]);
+    int mainr = vol_tick((uint16_t)load_sized(spu_regs, MAINVOL_R_OFFSET, 2), &main_sweep[1]);
     uint32_t eon = (uint32_t)load_sized(spu_regs, EON_OFFSET, 4);
     int32_t l = 0, r = 0;
     int32_t rev_in_l = 0, rev_in_r = 0;
@@ -556,8 +619,8 @@ mix_frame(void)
         if (voices[v].active) {
             uint32_t base = (uint32_t)v * 0x10;
             s = voice_next_sample(v, prev);
-            int vl = vol_level((uint16_t)load_sized(spu_regs, base + V_VOL_L, 2));
-            int vr = vol_level((uint16_t)load_sized(spu_regs, base + V_VOL_R, 2));
+            int vl = vol_tick((uint16_t)load_sized(spu_regs, base + V_VOL_L, 2), &voice_sweep[v][0]);
+            int vr = vol_tick((uint16_t)load_sized(spu_regs, base + V_VOL_R, 2), &voice_sweep[v][1]);
             int sl = (s * vl) >> 15;
             int sr = (s * vr) >> 15;
             l += sl;

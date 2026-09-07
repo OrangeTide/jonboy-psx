@@ -193,6 +193,7 @@ main(void)
     if (n > 4096) {
         n = 4096;
     }
+    int noise_n = n;
 
     int distinct = 0, nz = 0;
     int16_t seen = out[0];
@@ -273,6 +274,42 @@ main(void)
         failures++;
     }
 
+    // ---- Volume sweep: a sweep-increase on the left volume ramps amplitude. ----
+    psx_spu_reset();
+    wr16(MAINVOL_L, 0x7FFF);
+    wr16(MAINVOL_R, 0x7FFF);
+    wr16(XFER_ADDR, 0x1000 / 8);
+    wr16(XFER_FIFO, 0x0300);
+    for (int i = 0; i < 7; i++) {
+        wr16(XFER_FIFO, 0x1111);       // constant 4096 sample
+    }
+    wr16(0x0, 0x8020);                 // vol L: sweep mode, linear increase, rate 0x20
+    wr16(0x2, 0x0000);                 // vol R: silent, isolate L
+    wr16(0x4, 0x1000);
+    wr16(0x6, 0x1000 / 8);
+    wr16(0x8, 0x000F);
+    wr16(0xA, 0x0000);
+    wr32(KON, 0x00000001);
+
+    tick_samples(2000);
+    n = spu_output_pull(out, 4096);
+    if (n > 2000) {
+        n = 2000;
+    }
+
+    long early = 0, late = 0;
+    for (int i = 0; i < 100; i++) {
+        early += out[i * 2] < 0 ? -out[i * 2] : out[i * 2];
+    }
+    for (int i = n - 100; i < n; i++) {
+        late += out[i * 2] < 0 ? -out[i * 2] : out[i * 2];
+    }
+    if (late <= early * 2) {
+        fprintf(stderr, "FAIL: volume sweep did not ramp up (early=%ld late=%ld)\n",
+                early, late);
+        failures++;
+    }
+
     if (failures) {
         fprintf(stderr, "SPU test: %d failures\n", failures);
         return 1;
@@ -280,8 +317,9 @@ main(void)
     printf("PASS: SPU CD mix and ADPCM voice synthesis correct (voice peak %d)\n",
            peak);
     printf("PASS: reverb alters output (%d/%d samples differ)\n", diff, 4000 * 2);
-    printf("PASS: noise voice varies (%d changes over %d samples)\n", distinct, n);
+    printf("PASS: noise voice varies (%d changes over %d samples)\n", distinct, noise_n);
     printf("PASS: pitch modulation alters voice 1 (%d/%d samples differ)\n",
            pm_diff, 2000 * 2);
+    printf("PASS: volume sweep ramps up (early=%ld late=%ld)\n", early, late);
     return 0;
 }

@@ -53,10 +53,12 @@ card address report no device.
   sample by the SPUCNT noise-frequency field, and a voice with its NON bit set
   outputs noise (still shaped by its envelope) instead of ADPCM. Pitch modulation
   is in: a voice with its PMON bit set scales its pitch step by the previous
-  voice's output sample each frame. Not modeled yet: volume sweep envelopes
-  (fixed levels only), the SPU IRQ on a sound-RAM address, CD audio routed into
-  reverb, and XA-ADPCM streaming audio. Voice mixing uses linear interpolation
-  rather than the hardware Gaussian.
+  voice's output sample each frame. Volume sweeps are in: the per-voice and main
+  volume registers, when in sweep mode (bit15), ramp their level each sample with
+  the ADSR rate tables (linear/exponential, increase/decrease, both phases). Not
+  modeled yet: the SPU IRQ on a sound-RAM address, CD audio routed into reverb,
+  sweeps on the CD and reverb output volumes, and XA-ADPCM streaming audio. Voice
+  mixing uses linear interpolation rather than the hardware Gaussian.
 
 ## Storage
 
