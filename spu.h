@@ -18,4 +18,9 @@ void psx_spu_reset(void);
 // this currently discards; it is the seam for CD music once the SPU emits sound.
 void spu_cd_audio(const int16_t *frames, int nframes);
 
+// Drain up to max_frames stereo frames of SPU output into dst (interleaved
+// 16-bit L/R). Returns the number of frames written. The app calls this and
+// hands the frames to the sound device.
+int spu_output_pull(int16_t *dst, int max_frames);
+
 #endif

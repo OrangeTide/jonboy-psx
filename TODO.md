@@ -33,8 +33,16 @@ card address report no device.
 
 ## Audio
 
-- [ ] add sound support. spu.c currently only stubs the register reads, so the
-  BIOS thinks the SPU is present but no audio is generated.
+- [~] add sound support. The audio output backend is in: main.c opens an SDL3
+  44.1 kHz stereo output stream and drains the SPU each frame; spu.c owns an
+  output ring and mixes CD-DA in through spu_cd_audio, scaled by the CD input
+  volume (0x1F801DB0/DB2), the main volume (0x1F801D80/D82), and gated by the
+  SPUCNT CD-enable bit. Unit tested (test_spu.c, `make spu-test`). Headless and
+  the tests build without SDL: spu.c has no SDL dependency, the app owns the
+  device. So CD-DA music now plays. Still stubbed: the 24 ADPCM voice channels
+  are not synthesized (no ADSR, pitch, or SPU-RAM sample playback), so sequenced
+  game music and sound effects are still silent, and reverb and volume sweeps are
+  not modeled. XA-ADPCM streaming audio is also not decoded yet.
 
 ## Storage
 
@@ -63,8 +71,9 @@ Next up (in order):
   done: INDEX 00 pregaps and PREGAP/POSTGAP are not tracked (INDEX 01 gives each
   track start), which is fine for data boot and enough for CD-DA positioning.
 
-- [~] audio-track (CD-DA) playback for games that stream music. The controller
-  and protocol side is done and unit tested (test_cdda.c, `make cdda-test`):
+- [x] audio-track (CD-DA) playback for games that stream music. Controller,
+  protocol, and audible output are done and unit tested (test_cdda.c, spu.c mixes
+  it to the SDL device; `make cdda-test`):
   - Play (0x03) starts at the track in the parameter, or the last Setloc when no
     parameter is given; Pause/Stop/Init and a ReadN stop playback.
   - the play pump streams one 2352-byte audio sector per tick, decoded to 588
@@ -75,10 +84,12 @@ Next up (in order):
     MSF) in BCD. GetTN/GetTD were added with the track table.
   - the Setmode report bit (0x04) delivers an INT1 position report per sector;
     the auto-pause bit (0x02) and the lead-out stop the drive with an INT4.
-  Remaining: no sound is actually emitted. spu_cd_audio discards the PCM because
-  the SPU is still a register stub with no audio backend. Finishing this needs
-  the Audio work below: an SDL audio output and CD-volume mixing (0x1F801DB0) in
-  spu_cd_audio. Also not done: XA-ADPCM streaming audio, and CD volume scaling.
+  - the play pump runs at the real CD-DA rate (75 sectors/second, 451584 CPU
+    cycles per sector) so the pitch is correct, and the decoded PCM now reaches
+    the SDL audio output through spu_cd_audio (see Audio above), so CD music is
+    audible in the windowed emulator.
+  Remaining: XA-ADPCM streaming audio is not decoded, and the report-mode INT1
+  cadence is one per sector rather than the hardware's coarser subchannel timing.
 
 ## DMA and interrupts
 

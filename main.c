@@ -15,6 +15,7 @@
 #include "vram.h"
 #include "rom.h"
 #include "cdrom.h"
+#include "spu.h"
 
 // Map a host key to a digital pad button bit, or 0 if it is not a pad key.
 static uint16_t
@@ -60,9 +61,38 @@ typedef struct {
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *vram_texture; // Target texture handle for rendering
+    SDL_AudioStream *audio;    // SPU output sink (NULL if audio failed to open)
     bool is_running;
     bool full_vram_view;       // F1 toggles between display area and full VRAM
 } AppContext;
+
+// SPU output is 44.1 kHz stereo 16-bit. Drain the SPU ring after each emulated
+// frame and hand it to the audio device, keeping at most a short backlog so the
+// sound stays near the picture.
+#define AUDIO_RATE 44100
+#define AUDIO_MAX_QUEUED_FRAMES (AUDIO_RATE / 5) // ~0.2 s latency cap
+
+static void
+pump_audio(AppContext *app)
+{
+    if (!app->audio) {
+        return;
+    }
+
+    int16_t buf[1024 * 2];
+    int n;
+    while ((n = spu_output_pull(buf, 1024)) > 0) {
+        // Drop rather than let latency grow without bound if emulation runs
+        // ahead of real time.
+        int queued = SDL_GetAudioStreamQueued(app->audio) / (int)(2 * sizeof(int16_t));
+        if (queued < AUDIO_MAX_QUEUED_FRAMES) {
+            SDL_PutAudioStreamData(app->audio, buf, n * 2 * (int)sizeof(int16_t));
+        }
+        if (n < 1024) {
+            break;
+        }
+    }
+}
 
 static void
 render_vram_to_screen(AppContext* app)
@@ -120,7 +150,7 @@ jonboy_runapp(int argc, char *argv[])
     (void)argc, (void)argv;
 
     // 1. Initialize SDL3 subsystems
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         SDL_Log("SDL_Init Error: %s", SDL_GetError());
         return 1;
     }
@@ -148,6 +178,17 @@ jonboy_runapp(int argc, char *argv[])
         SDL_DestroyWindow(app.window);
         SDL_Quit();
         return 1;
+    }
+
+    // Open the audio output stream for SPU/CD sound. A failure here is not
+    // fatal: the emulator runs silently.
+    SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, AUDIO_RATE };
+    app.audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+                                          &spec, NULL, NULL);
+    if (app.audio) {
+        SDL_ResumeAudioStreamDevice(app.audio);
+    } else {
+        SDL_Log("Audio open failed, running silent: %s", SDL_GetError());
     }
 
     // 3. Load the BIOS image into the mapped BIOS region (0x1FC00000).
@@ -242,6 +283,9 @@ jonboy_runapp(int argc, char *argv[])
 
             accumulator -= time_bridge;
 
+            // Hand this frame's SPU output to the sound device.
+            pump_audio(&app);
+
             // 5. Call optimized video renderer hook
             render_vram_to_screen(&app);
         }
@@ -251,6 +295,9 @@ jonboy_runapp(int argc, char *argv[])
     }
 
     // 6. Clean Cleanup Strategy
+    if (app.audio) {
+        SDL_DestroyAudioStream(app.audio);
+    }
     SDL_DestroyTexture(app.vram_texture);
     SDL_DestroyRenderer(app.renderer);
     SDL_DestroyWindow(app.window);

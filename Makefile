@@ -34,7 +34,7 @@ conformance : $(BINDIR)/jonboy
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance amalg cdda-test
+.PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test
 ## jonboy
 EMU_SRC=cdrom.c cpu.c dma.c gpu.c inject.c main.c mem.c pad.c psio.c rom.c sched.c spu.c timer.c vram.c
 all :: $(BINDIR)/jonboy
@@ -57,14 +57,18 @@ $(BINDIR)/jonboy.c : $(EMU_SRC) $(wildcard *.h) tools/amalgamate.awk | $(BINDIR)
 	awk -f tools/amalgamate.awk $(EMU_SRC) > $@
 $(BINDIR)/jonboy-amalg : $(BINDIR)/jonboy.c | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) $(shell pkg-config --cflags sdl3) $< $(shell pkg-config --libs sdl3)
-## cd-da unit test (host build of cdrom.c with stub globals, no SDL)
-all :: $(BINDIR)/test_cdda
+## host unit tests (built without SDL: cdrom.c/spu.c with stub globals)
+all :: $(BINDIR)/test_cdda $(BINDIR)/test_spu
 clean ::
-	$(RM) $(BINDIR)/test_cdda
+	$(RM) $(BINDIR)/test_cdda $(BINDIR)/test_spu
 $(BINDIR)/test_cdda : test_cdda.c cdrom.c cdrom.h cpu.h mem.h spu.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_cdda.c cdrom.c
+$(BINDIR)/test_spu : test_spu.c spu.c spu.h lebytes.h | $(BINDIR)
+	$(CC) -o $@ $(CFLAGS) test_spu.c spu.c
 cdda-test : $(BINDIR)/test_cdda
 	./$(BINDIR)/test_cdda
+spu-test : $(BINDIR)/test_spu
+	./$(BINDIR)/test_spu
 ## testcarts
 TESTS=test1 test2 test3 test4 test5 test6 test7 test8 test9
 TEST_CARTS=$(TESTS:%=$(BINDIR)/%.cart)

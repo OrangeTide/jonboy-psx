@@ -91,7 +91,7 @@ main(void)
     // Pump several sectors; report mode is off, so nothing needs acking between
     // them. Each tick past the sector delay streams one sector.
     for (int i = 0; i < 6; i++) {
-        psx_cdrom_tick(8000);
+        psx_cdrom_tick(500000);
     }
 
     if (!cap_have) {
@@ -136,7 +136,7 @@ main(void)
     psx_cdrom_tick(4000);
     cd_ack();
     for (int i = 0; i < 4; i++) {
-        psx_cdrom_tick(8000);
+        psx_cdrom_tick(500000);
     }
 
     if (!cap_have) {

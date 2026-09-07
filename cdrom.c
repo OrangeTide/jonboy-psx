@@ -36,6 +36,11 @@
 #define CDROM_RESP_DELAY 2000
 #define CDROM_READ_DELAY 6000
 
+// CD-DA plays 75 sectors per second in real time, so one audio sector spans
+// 33868800 / 75 CPU cycles. Data reads use the faster CDROM_READ_DELAY, but
+// audio must keep real-time pitch, so the play pump uses this instead.
+#define CDDA_SECTOR_CYCLES 451584
+
 #define FIFO_MAX 16
 #define QUEUE_MAX 8
 #define RAW_SECTOR 2352
@@ -644,7 +649,7 @@ run_command(uint8_t cmd)
         cd.play_lba = start;
         cd.playing = 1;
         cd.reading = 0;
-        cd.play_delay = CDROM_READ_DELAY;
+        cd.play_delay = CDDA_SECTOR_CYCLES;
         stat[0] = status_byte();
         enqueue(INT3, stat, 1);
         break;
@@ -753,7 +758,7 @@ psx_cdrom_tick(uint32_t cycles)
                 enqueue(INT1, rep, 8);
                 deliver_next();
             }
-            cd.play_delay = CDROM_READ_DELAY;
+            cd.play_delay = CDDA_SECTOR_CYCLES;
         }
     }
 }
