@@ -214,6 +214,65 @@ main(void)
         failures++;
     }
 
+    // ---- Pitch modulation: voice 0 modulates voice 1's pitch. ----
+    int16_t pm_off[4096], pm_on[4096];
+    for (int pass = 0; pass < 2; pass++) {
+        int pmon = pass == 1;
+
+        psx_spu_reset();
+        wr16(MAINVOL_L, 0x7FFF);
+        wr16(MAINVOL_R, 0x7FFF);
+
+        // Voice 0 (the modulator): constant full-scale block, output muted so it
+        // only modulates. Uploaded at sound-RAM 0x1000.
+        wr16(XFER_ADDR, 0x1000 / 8);
+        wr16(XFER_FIFO, 0x0300);
+        for (int i = 0; i < 7; i++) {
+            wr16(XFER_FIFO, 0x1111);
+        }
+        // Voice 1 (modulated): a square wave (nibbles alternate 1 and F).
+        wr16(XFER_ADDR, 0x2000 / 8);
+        wr16(XFER_FIFO, 0x0300);
+        for (int i = 0; i < 7; i++) {
+            wr16(XFER_FIFO, 0x1F1F);
+        }
+
+        wr16(0x0, 0x0000);            // voice 0 volume L (muted)
+        wr16(0x2, 0x0000);            // voice 0 volume R
+        wr16(0x4, 0x1000);            // voice 0 pitch
+        wr16(0x6, 0x1000 / 8);       // voice 0 start
+        wr16(0x8, 0x000F);
+        wr16(0xA, 0x0000);
+
+        wr16(0x10, 0x7FFF);           // voice 1 volume L
+        wr16(0x12, 0x7FFF);           // voice 1 volume R
+        wr16(0x14, 0x1000);           // voice 1 pitch (base)
+        wr16(0x16, 0x2000 / 8);      // voice 1 start
+        wr16(0x18, 0x000F);
+        wr16(0x1A, 0x0000);
+
+        wr32(0x190, pmon ? 0x00000002 : 0); // PMON: voice 1
+        wr32(KON, 0x00000003);        // key on voices 0 and 1
+
+        int got = 0;
+        int16_t *dst = pmon ? pm_on : pm_off;
+        while (got < 2000) {
+            tick_samples(256);
+            got += spu_output_pull(dst + got * 2, 256);
+        }
+    }
+
+    int pm_diff = 0;
+    for (int i = 0; i < 2000 * 2; i++) {
+        if (pm_off[i] != pm_on[i]) {
+            pm_diff++;
+        }
+    }
+    if (pm_diff == 0) {
+        fprintf(stderr, "FAIL: pitch modulation did not change voice 1\n");
+        failures++;
+    }
+
     if (failures) {
         fprintf(stderr, "SPU test: %d failures\n", failures);
         return 1;
@@ -222,5 +281,7 @@ main(void)
            peak);
     printf("PASS: reverb alters output (%d/%d samples differ)\n", diff, 4000 * 2);
     printf("PASS: noise voice varies (%d changes over %d samples)\n", distinct, n);
+    printf("PASS: pitch modulation alters voice 1 (%d/%d samples differ)\n",
+           pm_diff, 2000 * 2);
     return 0;
 }

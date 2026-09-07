@@ -138,6 +138,7 @@ noise_clock(void)
     }
 }
 
+#define PMON_OFFSET    0x190 // voice pitch-modulation bits
 #define NON_OFFSET     0x194 // voice noise-mode bits
 #define EON_OFFSET     0x198 // voice reverb-enable bits
 #define VLOUT_OFFSET   0x184 // reverb output volume left
@@ -384,9 +385,10 @@ env_step(Voice *ch, uint32_t base)
     }
 }
 
-// Produce one enveloped sample for a voice and advance its position.
+// Produce one enveloped sample for a voice and advance its position. pmod is the
+// previous voice's output sample, used when this voice has pitch modulation on.
 static int
-voice_next_sample(int v)
+voice_next_sample(int v, int pmod)
 {
     Voice *ch = &voices[v];
     uint32_t base = (uint32_t)v * 0x10;
@@ -411,8 +413,16 @@ voice_next_sample(int v)
     s = (s * ch->env) >> 15;
 
     int pitch = (int)load_sized(spu_regs, base + V_PITCH, 2) & 0xFFFF;
+    // Pitch modulation: scale the step by the previous voice's output.
+    if (v > 0 && (load_sized(spu_regs, PMON_OFFSET, 4) & (1u << v))) {
+        int factor = pmod + 0x8000; // 0..0xFFFF
+        pitch = (pitch * factor) >> 15;
+    }
     if (pitch > 0x3FFF) {
         pitch = 0x3FFF;
+    }
+    if (pitch < 0) {
+        pitch = 0;
     }
     ch->pitch_counter += pitch;
     while (ch->pitch_counter >= 0x1000) {
@@ -540,22 +550,24 @@ mix_frame(void)
 
     noise_clock();
 
+    int prev = 0; // previous voice's output, for pitch modulation
     for (int v = 0; v < NUM_VOICES; v++) {
-        if (!voices[v].active) {
-            continue;
+        int s = 0;
+        if (voices[v].active) {
+            uint32_t base = (uint32_t)v * 0x10;
+            s = voice_next_sample(v, prev);
+            int vl = vol_level((uint16_t)load_sized(spu_regs, base + V_VOL_L, 2));
+            int vr = vol_level((uint16_t)load_sized(spu_regs, base + V_VOL_R, 2));
+            int sl = (s * vl) >> 15;
+            int sr = (s * vr) >> 15;
+            l += sl;
+            r += sr;
+            if (eon & (1u << v)) {
+                rev_in_l += sl;
+                rev_in_r += sr;
+            }
         }
-        uint32_t base = (uint32_t)v * 0x10;
-        int s = voice_next_sample(v);
-        int vl = vol_level((uint16_t)load_sized(spu_regs, base + V_VOL_L, 2));
-        int vr = vol_level((uint16_t)load_sized(spu_regs, base + V_VOL_R, 2));
-        int sl = (s * vl) >> 15;
-        int sr = (s * vr) >> 15;
-        l += sl;
-        r += sr;
-        if (eon & (1u << v)) {
-            rev_in_l += sl;
-            rev_in_r += sr;
-        }
+        prev = s; // 0 for an inactive voice
     }
 
     l = (l * mainl) >> 15;

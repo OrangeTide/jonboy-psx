@@ -51,10 +51,12 @@ card address report no device.
   bit, with its ~30 coefficient/address registers, mBASE, and vLOUT/vROUT. Noise
   voices are in: the Dr. Hell/Xebra LFSR noise generator is clocked per output
   sample by the SPUCNT noise-frequency field, and a voice with its NON bit set
-  outputs noise (still shaped by its envelope) instead of ADPCM. Not modeled yet:
-  pitch modulation (PMON), volume sweep envelopes (fixed levels only), the SPU
-  IRQ on a sound-RAM address, CD audio routed into reverb, and XA-ADPCM streaming
-  audio. Voice mixing uses linear interpolation rather than the hardware Gaussian.
+  outputs noise (still shaped by its envelope) instead of ADPCM. Pitch modulation
+  is in: a voice with its PMON bit set scales its pitch step by the previous
+  voice's output sample each frame. Not modeled yet: volume sweep envelopes
+  (fixed levels only), the SPU IRQ on a sound-RAM address, CD audio routed into
+  reverb, and XA-ADPCM streaming audio. Voice mixing uses linear interpolation
+  rather than the hardware Gaussian.
 
 ## Storage
 
