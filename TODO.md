@@ -38,9 +38,16 @@ card address report no device.
 
 ## Storage
 
-- [ ] add cd-rom support. cdrom.c implements the register interface and command
-  handshake but always reports "no disc". Remaining: load a disc image (cue/bin
-  or iso), map LBA to sectors, and deliver sector data.
+- [x] add cd-rom support. cdrom.c mounts a .bin/.cue image (raw 2352-byte
+  sectors), answers GetID as a licensed disc, and serves sectors through Setloc,
+  Setmode, SeekL, ReadN/ReadS, and Pause. Sector data reaches RAM through the
+  data FIFO and DMA channel 3. Mount with --cd. Verified end to end: the retail
+  scph5501 BIOS reads the license region, parses SYSTEM.CNF, loads the boot
+  executable, and runs it (Final Fantasy Tactics reaches its own startup code).
+  - [ ] the booted game then stalls in its own init loop, which depends on other
+    subsystems (SPU, GPU/DMA timing), not the CD-ROM. Chase those next.
+  - [ ] audio-track (CD-DA) playback and Play/GetlocL for games that stream music
+  - [ ] multi-track .cue images (only the first data track is opened today)
 - EXP1 boot hook (verified, reused by the loader below): psio.c presents the
   cartridge as a ROM in Expansion Region 1. The scph5501 BIOS checks the pre-boot
   signature ("Licensed by Sony Computer Entertainment Inc.") at 0x1F000084 and,

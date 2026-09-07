@@ -3,6 +3,7 @@
 #include "gpu.h"
 #include "mem.h"
 #include "psio.h"
+#include "cdrom.h"
 #include <string.h>
 
 DMA_Channel dma_channels[7];
@@ -73,6 +74,30 @@ dma_psio_read(int channel)
         // Short read (EOF or error): zero the remainder so RAM stays defined.
         memset(&system_ram[madr + got], 0, bytes - got);
     }
+}
+
+// CD-ROM DMA (channel 3): copy the current sector's data words into RAM. The
+// word count comes from BCR the same way as the card transfer above.
+static void
+dma_cdrom_read(int channel)
+{
+    uint32_t chcr = dma_channels[channel].chcr;
+    uint32_t bcr  = dma_channels[channel].bcr;
+    uint32_t madr = dma_channels[channel].madr & RAM_MASK;
+
+    if ((chcr & 1) != 0) {
+        return; // only device to RAM makes sense
+    }
+
+    uint32_t block_size  = bcr & 0xFFFF;
+    uint32_t block_count = (bcr >> 16) & 0xFFFF;
+    uint32_t words = block_size * block_count;
+
+    if (words == 0) {
+        words = block_size;
+    }
+
+    cdrom_dma_read(madr, words);
 }
 
 // Walk a GPU command linked list (SyncMode 2). Each node is a header word whose
@@ -170,8 +195,12 @@ run_dma_transfer(int channel)
         dma_gpu(channel);
         break;
 
-    case 3: // CD-ROM slot, driven by the PSIO cartridge
-        dma_psio_read(channel);
+    case 3: // CD-ROM slot: a mounted disc serves sectors, else the PSIO card
+        if (cdrom_has_disc()) {
+            dma_cdrom_read(channel);
+        } else {
+            dma_psio_read(channel);
+        }
         break;
 
     case 6: // Ordering-table clear

@@ -14,6 +14,7 @@
 #include "psio.h"
 #include "vram.h"
 #include "rom.h"
+#include "cdrom.h"
 
 // Map a host key to a digital pad button bit, or 0 if it is not a pad key.
 static uint16_t
@@ -44,6 +45,7 @@ static const char *g_psio_firmware = NULL; // optional PSIO firmware ROM image
 static const char *g_bios_path = "bios.bin"; // BIOS image to load
 static const char *g_sideload_exe = NULL;    // PS-EXE to run atop the booted kernel
 static const char *g_games_dir = NULL;       // directory the loader menu browses
+static const char *g_cd_path = NULL;         // disc image to mount (.bin/.cue)
 
 #define TARGET_FPS 60
 
@@ -501,6 +503,14 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
         loader_set_games_dir(g_games_dir);
     }
 
+    if (g_cd_path) {
+        if (cdrom_mount(g_cd_path) == 0) {
+            printf("Mounted disc %s\n", g_cd_path);
+        } else {
+            fprintf(stderr, "cd: failed to mount %s\n", g_cd_path);
+        }
+    }
+
     cpu_reset(0xBFC00000);
     // A sideloaded program runs with a live BIOS, so BREAK must vector to the
     // handler (some tests rely on it) rather than stopping the harness.
@@ -592,6 +602,7 @@ print_usage(const char *prog)
             "  --sd <file>         mount a virtual SD-card image\n"
             "  --firmware <file>   load a PSIO firmware ROM image\n"
             "  --games <dir>       directory the loader menu browses for images\n"
+            "  --cd <file>         mount a disc image (.bin or .cue)\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
             "  --pc <hex>          entry PC (default = load address)\n"
@@ -631,6 +642,8 @@ main(int argc, char *argv[])
             g_psio_firmware = argv[++i];
         } else if (strcmp(argv[i], "--games") == 0 && i + 1 < argc) {
             g_games_dir = argv[++i];
+        } else if (strcmp(argv[i], "--cd") == 0 && i + 1 < argc) {
+            g_cd_path = argv[++i];
         } else if (strcmp(argv[i], "--bios") == 0 && i + 1 < argc) {
             g_bios_path = argv[++i];
         } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
