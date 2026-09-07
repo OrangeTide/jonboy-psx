@@ -60,19 +60,19 @@ card address report no device.
 - [x] commit a pending load-delay latch before taking an interrupt. Dropping it
   left the target register stale and corrupted a copy loop interrupted right
   after a load.
-- [ ] Final Fantasy Tactics now boots and runs its own startup past SPU init,
-  but crashes ~260M steps in. Investigated in depth: an interrupt taken during a
-  game memcpy loop (~0x80014440) dispatches through an interrupt-handler pointer
-  that points into a game DATA buffer (~0x8006B5A0, filled with data by a BIOS
-  memcpy at 0xBFC02B68), so it runs data as code and jumps to garbage. The bad
-  pointer is pre-existing: the crash lands the same way whether the triggering
-  interrupt is TIMER2 or DMA (only which interrupt fires shifts with timing), so
-  the DMA-completion work above did not cause it, it only let the game run far
-  enough to reach it. The handler pointer is corrupt before this point; finding
-  where it first goes wrong needs a reference trace (REF/pcsx-redux) to diff RAM
-  and register state at the divergence. Debug recipe: an env-gated bad-PC halt
-  plus a recent-PC ring in step_cpu, a byte-range memory-write watch in mem.c,
-  and objdump -b binary -m mips:3000 -EL on a RAM dump.
+- [x] Final Fantasy Tactics crashed ~260M steps into its own init. Root cause:
+  the CD-ROM data request cursor was reset on every write of the request bit
+  (BFRD, 0x1F801803 bit7). The game drains one 2340-byte (whole-sector) read in
+  two transfers, a 12-byte header/subheader read followed by a 2048-byte user
+  data read, writing the request bit before each. Resetting the cursor on the
+  second request re-delivered the 12-byte header, so every user-data DMA landed
+  shifted +12 bytes. That corrupted an in-RAM size field, the game's allocator
+  saw a 3 GB request and returned null, and the null cascaded into the eventual
+  jump to garbage. Fixed by positioning the cursor only on the first request per
+  sector (matching pcsx-redux's m_read==0 guard). Verified against a pcsx-redux
+  reference trace: at the checkpoint (PC 0x80014440) RAM at 0x80067000 and the
+  allocator result registers now match byte for byte, and the game runs past
+  600M steps in the same code loop pcsx reaches (~0x8001DD18).
 - EXP1 boot hook (verified, reused by the loader below): psio.c presents the
   cartridge as a ROM in Expansion Region 1. The scph5501 BIOS checks the pre-boot
   signature ("Licensed by Sony Computer Entertainment Inc.") at 0x1F000084 and,

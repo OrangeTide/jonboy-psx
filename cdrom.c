@@ -76,6 +76,7 @@ static struct {
     int data_len;
     int data_ptr;
     int data_active;        // the CPU asked for the sector (request bit)
+    int sector_started;     // the request cursor has been positioned this sector
 } cd;
 
 static int
@@ -222,6 +223,7 @@ load_sector(void)
 
     cd.data_len = 0;
     cd.data_ptr = 0;
+    cd.sector_started = 0;
 
     if (!cd.disc) {
         return;
@@ -469,11 +471,18 @@ psx_cdrom_write(uint32_t phys_addr, uint32_t value, int size)
             }
         } else if (reg == 3) {
             // Request register: bit7 (BFRD) exposes the loaded sector on the data
-            // FIFO. Clearing it only stops delivery; it must not discard the
-            // sector already loaded by the read, which DMA is about to fetch.
+            // FIFO. The read cursor is positioned only on the first request for a
+            // sector; later requests keep it where it is, so a game that drains
+            // one sector in several transfers (for example a 12-byte header read
+            // followed by a 2048-byte data read) continues rather than restarting.
+            // Clearing the bit only stops delivery; it must not discard the sector
+            // already loaded, which DMA is about to fetch.
             if (v & 0x80) {
                 cd.data_active = 1;
-                cd.data_ptr = 0;
+                if (!cd.sector_started) {
+                    cd.data_ptr = 0;
+                    cd.sector_started = 1;
+                }
             } else {
                 cd.data_active = 0;
             }
