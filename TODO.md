@@ -44,8 +44,37 @@ card address report no device.
   data FIFO and DMA channel 3. Mount with --cd. Verified end to end: the retail
   scph5501 BIOS reads the license region, parses SYSTEM.CNF, loads the boot
   executable, and runs it (Final Fantasy Tactics reaches its own startup code).
-  - [ ] audio-track (CD-DA) playback and Play/GetlocL for games that stream music
-  - [ ] multi-track .cue images (only the first data track is opened today)
+
+Next up (in order):
+
+- [ ] multi-track .cue images. cdrom_mount today reads only the first quoted
+  FILE name and sets a single track_offset of 0, so audio tracks and any layout
+  past track 1 are invisible. Parse every TRACK and its INDEX lines, building a
+  track table: track number, type (MODE1/MODE2 data vs AUDIO), the INDEX 00
+  pregap, and the INDEX 01 start. Support both a single .bin addressed by byte
+  offset and one FILE per track. From the table:
+  - map an LBA to its track and know whether that track is data or audio.
+  - add GetTN (0x13): reply with first and last track numbers in BCD.
+  - add GetTD (0x14): given a track number, reply with that track's start MSF
+    in BCD (track 0 asks for the lead-out).
+  This is the prerequisite for CD-DA, which needs to locate and classify audio
+  tracks.
+
+- [ ] audio-track (CD-DA) playback for games that stream music. Depends on the
+  track table above and on an SPU audio output path (see Audio below); until the
+  SPU can emit sound the position and protocol side can still be built and
+  tested. Work:
+  - Play (0x03): start playback at the track in the parameter, or at the last
+    Setloc when no parameter is given. It is a stub now (status reply only).
+  - stream each 2352-byte audio sector as 588 stereo 16-bit PCM frames into the
+    SPU CD-audio input, scaled by the CD volume registers (0x1F801DB0), and gate
+    it on Mute/Demute (0x0B/0x0C, currently stubs).
+  - GetlocL (0x10): reply with the data-sector header (amm, ass, asect, mode,
+    file, channel, submode, coding) of the current position.
+  - GetlocP (0x11): reply with the play position, track, index, relative MSF
+    within the track, and absolute MSF, all in BCD.
+  - honor the Setmode report bit (0x04, deliver an INT1 with position per sector)
+    and the auto-pause bit (0x02, stop at the end of the track).
 
 ## DMA and interrupts
 
