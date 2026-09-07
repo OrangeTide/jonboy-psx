@@ -165,6 +165,19 @@ step_cpu(void)
     // Interrupts are taken at instruction boundaries, before fetching the next
     // instruction, so EPC names the instruction that has not run yet.
     if (interrupt_pending()) {
+        // A load started by the previous instruction still writes back before
+        // the interrupt is serviced. The delay-slot instruction that would have
+        // run next does not execute, so nothing can override the load; commit it
+        // here. Dropping it would leave the target register with its old value
+        // and silently corrupt state (a copy loop interrupted right after a load
+        // would store the wrong word).
+        if (cpu.load_reg != 0) {
+            cpu.regs[cpu.load_reg] = cpu.load_val;
+            cpu.load_reg = 0;
+            cpu.load_val = 0;
+            cpu.regs[0] = 0;
+        }
+
         cpu.current_pc = cpu.PC;
         cpu.in_delay_slot = cpu.branch_taken; // the pending instruction is a slot
         raise_exception(EXC_INT);

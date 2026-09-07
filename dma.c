@@ -76,6 +76,34 @@ dma_psio_read(int channel)
     }
 }
 
+// SPU DMA (channel 4): the SPU sound RAM is not modeled yet, so a write to the
+// SPU just consumes the words and a read back fills RAM with zeros. Completing
+// the transfer and raising the SPU interrupt is what unblocks a game that waits
+// on the SPU event (HwSPU) after kicking a sound upload.
+static void
+dma_spu(int channel)
+{
+    uint32_t chcr = dma_channels[channel].chcr;
+    uint32_t bcr  = dma_channels[channel].bcr;
+    uint32_t madr = dma_channels[channel].madr & RAM_MASK;
+
+    uint32_t block_size  = bcr & 0xFFFF;
+    uint32_t block_count = (bcr >> 16) & 0xFFFF;
+    uint32_t words = block_size * block_count;
+
+    if (words == 0) {
+        words = block_size;
+    }
+
+    // Direction is CHCR bit 0: 1 = RAM to device (a sound upload). Only a read
+    // back needs to touch RAM, and it has nothing real to return yet.
+    if ((chcr & 1) == 0) {
+        for (uint32_t i = 0; i < words; i++) {
+            MEM_WRITE_32((madr + i * 4) & RAM_MASK, 0);
+        }
+    }
+}
+
 // CD-ROM DMA (channel 3): copy the current sector's data words into RAM. The
 // word count comes from BCR the same way as the card transfer above.
 static void
@@ -168,6 +196,27 @@ dma_gpu(int channel)
     }
 }
 
+// Cycles to wait before a completed DMA pulses the CPU interrupt line.
+#define DMA_IRQ_DELAY 700
+
+static int dma_irq_delay;
+
+// Advance the deferred DMA completion interrupt and pull the CPU line when it
+// expires. Called from the hardware tick.
+void
+psx_dma_tick(uint32_t cycles)
+{
+    if (dma_irq_delay > 0) {
+        dma_irq_delay -= (int)cycles;
+        if (dma_irq_delay <= 0) {
+            dma_irq_delay = 0;
+            if (dma_interrupt & 0x80000000u) {
+                cpu.i_stat |= (1u << IRQ_DMA);
+            }
+        }
+    }
+}
+
 // Shared completion path: clear the channel's start bit and, if the channel's
 // DMA interrupt is enabled, raise its flag and signal the CPU.
 static void
@@ -183,7 +232,11 @@ dma_finish(int channel)
     if (master_enable && channel_enable) {
         dma_interrupt |= (1u << (24 + channel)); // raise this channel's IRQ flag
         dma_interrupt |= (1u << 31);             // raise the master IRQ flag
-        cpu.i_stat |= (1u << 3);                 // signal the DMA line to the CPU
+        // Defer signaling the CPU. The transfer runs synchronously inside the
+        // triggering register write, but on real hardware the completion
+        // interrupt arrives a little later, after the code that kicked the DMA
+        // has returned. Firing it immediately would re-enter the game mid-setup.
+        dma_irq_delay = DMA_IRQ_DELAY;
     }
 }
 
@@ -201,6 +254,10 @@ run_dma_transfer(int channel)
         } else {
             dma_psio_read(channel);
         }
+        break;
+
+    case 4: // SPU sound upload / download
+        dma_spu(channel);
         break;
 
     case 6: // Ordering-table clear

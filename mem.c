@@ -435,6 +435,21 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
         cpu.i_mask = value;
         break;
 
+    // DMA control register (0x1F8010F0): channel priorities/enables, R/W.
+    case 0x10F0:
+        dma_control = value;
+        break;
+
+    // DMA interrupt register (0x1F8010F4). Bits 0-23 (force flag, per-channel
+    // enables, master enable) are read/write. The per-channel flag bits 24-30
+    // are acknowledged by writing a 1, so keep any not being cleared.
+    case 0x10F4: {
+        uint32_t flags = dma_interrupt & 0x7F000000;
+        flags &= ~(value & 0x7F000000);
+        dma_interrupt = (value & 0x00FFFFFF) | flags;
+        break;
+    }
+
     // GPU Commands (GP0 / GP1)
     case 0x1810:
         psx_gpu_send_command_gp0(value);

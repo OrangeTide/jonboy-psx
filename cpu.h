@@ -73,6 +73,8 @@ enum {
 #define IRQ_TIMER1 5
 #define IRQ_TIMER2 6
 #define IRQ_PAD    7
+#define IRQ_SIO    8
+#define IRQ_SPU    9
 
 // Standard MIPS-I Coprocessor 0 Hardware Register Indices
 enum {

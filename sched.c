@@ -4,6 +4,7 @@
 #include "spu.h"
 #include "timer.h"
 #include "cdrom.h"
+#include "dma.h"
 #include "pad.h"
 
 // Approximate NTSC timing: the ~33.87 MHz CPU clock over 60 Hz is about
@@ -35,4 +36,5 @@ psx_hardware_tick(uint32_t cycles)
 
     psx_timers_tick(cycles);
     psx_cdrom_tick(cycles);
+    psx_dma_tick(cycles);
 }

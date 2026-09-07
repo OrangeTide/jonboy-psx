@@ -44,10 +44,28 @@ card address report no device.
   data FIFO and DMA channel 3. Mount with --cd. Verified end to end: the retail
   scph5501 BIOS reads the license region, parses SYSTEM.CNF, loads the boot
   executable, and runs it (Final Fantasy Tactics reaches its own startup code).
-  - [ ] the booted game then stalls in its own init loop, which depends on other
-    subsystems (SPU, GPU/DMA timing), not the CD-ROM. Chase those next.
   - [ ] audio-track (CD-DA) playback and Play/GetlocL for games that stream music
   - [ ] multi-track .cue images (only the first data track is opened today)
+
+## DMA and interrupts
+
+- [x] handle DICR/DPCR writes (0x1F8010F0/0x1F8010F4). These were silently
+  dropped, so DMA completion interrupts never fired and any game waiting on a
+  DMA event hung. The channel-flag bits (24-30) acknowledge write-1-to-clear.
+- [x] SPU DMA (channel 4): consume a sound upload or zero-fill a read back, then
+  let the deferred completion interrupt fire. This unblocks libspu's SpuInit,
+  which uploads a block and waits on the SPU DMA event.
+- [x] deliver DMA completion interrupts a few cycles late instead of inside the
+  triggering register write, so the game code that kicked the DMA returns first.
+- [x] commit a pending load-delay latch before taking an interrupt. Dropping it
+  left the target register stale and corrupted a copy loop interrupted right
+  after a load.
+- [ ] Final Fantasy Tactics now boots and runs its own startup past SPU init,
+  but crashes ~260M steps in: an interrupt taken during a game copy loop
+  dispatches to a handler descriptor whose ISR pointer references data, not
+  code. The bad bytes come from an earlier data-setup step (CD overlay load,
+  GPU-DMA read back, or timing), so the divergence needs a reference-emulator
+  trace to pin down.
 - EXP1 boot hook (verified, reused by the loader below): psio.c presents the
   cartridge as a ROM in Expansion Region 1. The scph5501 BIOS checks the pre-boot
   signature ("Licensed by Sony Computer Entertainment Inc.") at 0x1F000084 and,

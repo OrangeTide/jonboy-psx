@@ -12,5 +12,6 @@ extern DMA_Channel dma_channels[7];
 extern uint32_t dma_control;   // Global DMA Control Register (0x1F8010F0)
 extern uint32_t dma_interrupt; // Global DMA Interrupt Register (0x1F8010F4)
 
+void psx_dma_tick(uint32_t cycles);
 void run_dma_transfer(int channel);
 #endif

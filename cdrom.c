@@ -3,7 +3,6 @@
 #include "mem.h"
 #include <stdio.h>
 #include <string.h>
-#include <stdlib.h>
 
 // CD-ROM controller. It implements the index/status register, the parameter and
 // response FIFOs, the interrupt flag/enable registers, and enough commands to
@@ -251,13 +250,6 @@ static void
 run_command(uint8_t cmd)
 {
     uint8_t stat[1] = { status_byte() };
-
-    if (getenv("CDDBG")) {
-        fprintf(stderr, "[cd] cmd 0x%02X params", cmd);
-        for (int i = 0; i < cd.param_count; i++)
-            fprintf(stderr, " %02X", cd.param_fifo[i]);
-        fprintf(stderr, " (seek_lba=%d mode=0x%02X)\n", cd.seek_lba, cd.mode);
-    }
 
     switch (cmd) {
     case 0x01: // Getstat
