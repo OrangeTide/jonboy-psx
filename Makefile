@@ -1,5 +1,17 @@
 BINDIR=_out
-CFLAGS=-Wall -W -g -Og
+# Optimization level is chosen per target architecture. On ARM (Raspberry Pi and
+# other Cortex targets) the interpreter and software rasterizer are the
+# bottleneck, so build optimized and tuned for the in-order Cortex-A53 pipeline.
+# Everywhere else (x86-64 dev machines) keep the debug-friendly -Og. The target
+# is read from the compiler's own triple ($(CC) -dumpmachine), so this stays
+# correct under a cross-compiler. Override by passing OPT= on the command line.
+TARGET:=$(shell $(CC) -dumpmachine)
+ifneq (,$(filter aarch64% arm%,$(TARGET)))
+OPT?=-O2 -mcpu=cortex-a53 -fomit-frame-pointer
+else
+OPT?=-Og
+endif
+CFLAGS=-Wall -W -g $(OPT)
 all ::
 clean ::
 clean-all : clean

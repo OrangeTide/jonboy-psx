@@ -392,3 +392,80 @@ set up.
 - Keep a reference emulator's instruction trace next to yours and diff them.
   The fastest way to find a CPU bug is the first instruction where the two
   traces disagree.
+
+## 12. Performance notes for low-power targets (Raspberry Pi 3)
+
+Added 2026-09-07. These are performance and portability findings, not
+correctness bugs, aimed at running the emulator on a Raspberry Pi 3
+(quad-core Cortex-A53, ARMv8-A with NEON, VideoCore IV / GLES 2.0). They are
+ranked by payoff per unit of effort. Measure on the actual hardware before
+committing to any rewrite: interpreter emulators on the A53 are usually
+CPU-interpreter-bound, not fill-bound, so confirm the bottleneck first.
+
+### 12.1 Build at an optimizing level (biggest, cheapest win)
+**Open.** The Makefile builds every binary at `-Og` (`CFLAGS=-Wall -W -g -Og`).
+Switch to `-O2 -mcpu=cortex-a53 -fomit-frame-pointer` for Pi builds. This is
+zero maintenance and zero accuracy risk, and it helps this codebase in specific
+ways:
+- `draw_triangle` calls `put_pixel`, `blend_555`, `sample_texel`, `unpack_555`,
+  `rgb_to_555`, and `modulate` once per pixel. All are file-scope `static`; at
+  `-Og` they stay as real calls, at `-O2` they inline into the pixel loop.
+- The CPU core double-dispatches: `delay_slot_dest()` runs a full `switch` and
+  the main execute path runs another `switch` per instruction. `-O2` turns both
+  into jump tables and keeps `cpu` state in registers across a step.
+- `-mcpu=cortex-a53` lets GCC schedule for the A53's in-order dual-issue
+  pipeline, which is far more scheduling-sensitive than a desktop core.
+
+Expect roughly 2x to 4x whole-program speedup before any other change.
+
+### 12.2 Upload only the visible VRAM rectangle, not all of VRAM
+**Open.** `refresh_screen` (`main.c`) transposes and copies the full 1024x512
+`vram.canvas` into the streaming texture every frame, but only a
+256/320/512/640 by 240/480 slice is ever displayed (`hres[]` in `gpu.c`). That
+is roughly 5x to 10x more pixel traffic than needed, and the column-major
+`canvas[x][y]` layout makes the transpose read strided and cache-hostile (a
+512-short stride per step). Transpose and lock only the current display
+rectangle. Small change, real saving on the Pi's memory bandwidth. Related to
+gap 7.3 (VRAM layout is column-major).
+
+### 12.3 Rasterizer: integer fixed-point before any SIMD
+**Open.** `draw_triangle` steps its edge functions in integers but computes
+barycentrics and colors/UVs in `float`, doing int-to-float-to-int conversions
+per pixel. On the A53 those conversions are comparatively slow. Convert the
+color and UV interpolation to incremental fixed-point stepping (the same way
+the edge functions already step). This removes all per-pixel FP with no SIMD
+and makes any later vectorization straightforward. Do this before evaluating
+NEON.
+
+### 12.4 On the rasterizer rewrite question (NEON vs asm vs GLES)
+Guidance, not a defect. None of the three is low-effort, and the rasterizer is
+likely not the first bottleneck.
+- NEON intrinsics: moderate-to-high effort, moderate payoff. The half-space
+  loop vectorizes across a scanline, but PSX primitives are frequently only a
+  few pixels wide, so utilization is poor except on large flat/Gouraud fills
+  (backgrounds). Worth it only for the large-fill path, and only after 12.3.
+- Hand aarch64 assembly: not recommended. Little gain over NEON intrinsics with
+  `-O2` A53 scheduling, and it costs portability and the amalgamation build.
+- OpenGL ES 2.0 on VideoCore IV: highest ceiling, highest effort and accuracy
+  risk. A GLES backend means reimplementing PSX-exact semantics in shaders
+  (BGR555, the mask/STP bit, the four semi-transparency modes in `blend_555`,
+  dithering, texture windows, CLUT, affine UV) and reconciling the shared
+  1 MB VRAM-as-texture-memory model (0x80 VRAM-to-VRAM, 0xA0/0xC0 streaming).
+  This is the standard "hardware renderer" project, measured in weeks, and the
+  right move only if the goal is upscaling, not a quick perf patch.
+
+### 12.5 Use the other three cores
+**Open.** The emulator is single-threaded (`main.c` step loop), and the GPU
+draws synchronously inside the DMA/register write path. The Pi 3 has four A53
+cores; three sit idle. Decoupling rasterization onto a worker core (a command
+queue drained per frame) has a higher ceiling than SIMD-ing the current serial
+rasterizer, since it reclaims 3x of the machine. Medium-to-high structural
+effort, but more headroom than 12.4.
+
+### Suggested order
+1. `-O2 -mcpu=cortex-a53` (12.1), then re-measure.
+2. Upload only the visible VRAM rect (12.2).
+3. Profile on the actual Pi to confirm CPU-bound vs fill-bound.
+4. If fill-bound: fixed-point interpolation (12.3), then NEON the large-fill
+   path only.
+5. Shelve GLES and hand asm as perf patches; revisit GLES only for upscaling.
