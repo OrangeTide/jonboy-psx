@@ -176,6 +176,44 @@ main(void)
         failures++;
     }
 
+    // ---- Noise: a NON voice outputs the varying noise generator. ----
+    psx_spu_reset();
+    wr16(MAINVOL_L, 0x7FFF);
+    wr16(MAINVOL_R, 0x7FFF);
+    wr16(SPUCNT, 0x3000);              // noise clock: shift 12, step 0
+    wr32(0x194, 0x00000001);          // NON: voice 0 in noise mode
+    wr16(0x0, 0x7FFF);                 // volume L
+    wr16(0x2, 0x7FFF);                 // volume R
+    wr16(0x8, 0x000F);                 // fast attack, sustain max
+    wr16(0xA, 0x0000);
+    wr32(KON, 0x00000001);
+
+    tick_samples(4000);
+    n = spu_output_pull(out, 4096);
+    if (n > 4096) {
+        n = 4096;
+    }
+
+    int distinct = 0, nz = 0;
+    int16_t seen = out[0];
+    for (int i = 0; i < n; i++) {
+        if (out[i * 2] != 0) {
+            nz++;
+        }
+        if (out[i * 2] != seen) {
+            distinct++;
+            seen = out[i * 2];
+        }
+    }
+    if (!nz) {
+        fprintf(stderr, "FAIL: noise voice produced silence\n");
+        failures++;
+    }
+    if (distinct < 10) {
+        fprintf(stderr, "FAIL: noise output does not vary (only %d changes)\n", distinct);
+        failures++;
+    }
+
     if (failures) {
         fprintf(stderr, "SPU test: %d failures\n", failures);
         return 1;
@@ -183,5 +221,6 @@ main(void)
     printf("PASS: SPU CD mix and ADPCM voice synthesis correct (voice peak %d)\n",
            peak);
     printf("PASS: reverb alters output (%d/%d samples differ)\n", diff, 4000 * 2);
+    printf("PASS: noise voice varies (%d changes over %d samples)\n", distinct, n);
     return 0;
 }

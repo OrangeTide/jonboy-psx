@@ -104,6 +104,41 @@ static unsigned cd_fifo_w, cd_fifo_r;
 #define SPU_CYCLES_PER_SAMPLE 768
 static uint32_t spu_cycle_acc;
 
+// Noise generator (Dr. Hell/Xebra model). Clocked once per output sample at a
+// rate set by the SPUCNT noise-frequency field; voices with their NON bit set
+// output this value instead of ADPCM.
+static uint32_t spu_noise_val;
+static uint32_t spu_noise_count;
+
+static void
+noise_clock(void)
+{
+    static const char wave[64] = {
+        1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1,
+        1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0,
+        1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1
+    };
+    static const unsigned short freqadd[5] = { 0, 84, 140, 180, 210 };
+
+    int nclk = ((int)load_sized(spu_regs, SPUCNT_OFFSET, 2) >> 8) & 0x3F;
+    unsigned int level = (0x8000u >> (nclk >> 2)) << 16;
+
+    spu_noise_count += 0x10000;
+    spu_noise_count += freqadd[nclk & 3];
+    if ((spu_noise_count & 0xFFFF) >= freqadd[4]) {
+        spu_noise_count += 0x10000;
+        spu_noise_count -= freqadd[nclk & 3];
+    }
+
+    if (spu_noise_count >= level) {
+        while (spu_noise_count >= level) {
+            spu_noise_count -= level;
+        }
+        spu_noise_val = (spu_noise_val << 1) | wave[(spu_noise_val >> 10) & 63];
+    }
+}
+
+#define NON_OFFSET     0x194 // voice noise-mode bits
 #define EON_OFFSET     0x198 // voice reverb-enable bits
 #define VLOUT_OFFSET   0x184 // reverb output volume left
 #define VROUT_OFFSET   0x186 // reverb output volume right
@@ -137,6 +172,8 @@ psx_spu_reset(void)
     memset(spu_ram, 0, sizeof spu_ram);
     memset(voices, 0, sizeof voices);
     memset(&rvb, 0, sizeof rvb);
+    spu_noise_val = 0;
+    spu_noise_count = 0;
     spu_xfer_addr = 0;
     spu_endx = 0;
     spu_ring_w = spu_ring_r = 0;
@@ -354,6 +391,13 @@ voice_next_sample(int v)
     Voice *ch = &voices[v];
     uint32_t base = (uint32_t)v * 0x10;
 
+    // Noise-mode voice: output the noise generator, still shaped by the
+    // envelope. It ignores the ADPCM stream and pitch.
+    if (load_sized(spu_regs, NON_OFFSET, 4) & (1u << v)) {
+        env_step(ch, base);
+        return ((int)(int16_t)spu_noise_val * ch->env) >> 15;
+    }
+
     if (!ch->has_block) {
         decode_block(ch);
     }
@@ -493,6 +537,8 @@ mix_frame(void)
     uint32_t eon = (uint32_t)load_sized(spu_regs, EON_OFFSET, 4);
     int32_t l = 0, r = 0;
     int32_t rev_in_l = 0, rev_in_r = 0;
+
+    noise_clock();
 
     for (int v = 0; v < NUM_VOICES; v++) {
         if (!voices[v].active) {

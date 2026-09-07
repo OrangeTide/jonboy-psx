@@ -48,11 +48,13 @@ card address report no device.
   without it. So sequenced music and sound effects now play. Reverb is in too:
   the Neill Corlett/PEOPS model runs on a work area in sound RAM at 22.05 kHz,
   fed by the reverb-enabled voices (EON) and gated by the SPUCNT reverb-master
-  bit, with its ~30 coefficient/address registers, mBASE, and vLOUT/vROUT. Not
-  modeled yet: noise voices (NON), pitch modulation (PMON), volume sweep
-  envelopes (fixed levels only), the SPU IRQ on a sound-RAM address, CD audio
-  routed into reverb, and XA-ADPCM streaming audio. Voice mixing uses linear
-  interpolation rather than the hardware Gaussian.
+  bit, with its ~30 coefficient/address registers, mBASE, and vLOUT/vROUT. Noise
+  voices are in: the Dr. Hell/Xebra LFSR noise generator is clocked per output
+  sample by the SPUCNT noise-frequency field, and a voice with its NON bit set
+  outputs noise (still shaped by its envelope) instead of ADPCM. Not modeled yet:
+  pitch modulation (PMON), volume sweep envelopes (fixed levels only), the SPU
+  IRQ on a sound-RAM address, CD audio routed into reverb, and XA-ADPCM streaming
+  audio. Voice mixing uses linear interpolation rather than the hardware Gaussian.
 
 ## Storage
 
