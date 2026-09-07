@@ -4,15 +4,22 @@
 // so it links on its own.
 
 #include "spu.h"
+#include "cpu.h"
 
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
+// spu.c raises the sound-RAM IRQ through the CPU interrupt-status word, so the
+// test provides the cpu global it references.
+R3051_CPU cpu;
+
 #define MAINVOL_L 0x180
 #define MAINVOL_R 0x182
 #define KON       0x188
+#define IRQ_ADDR  0x1A4
 #define SPUCNT    0x1AA
+#define SPUSTAT   0x1AE
 #define XFER_ADDR 0x1A6
 #define XFER_FIFO 0x1A8
 #define CDVOL_L   0x1B0
@@ -367,6 +374,61 @@ main(void)
         failures++;
     }
 
+    // ---- Sound-RAM IRQ (interrupt 9) --------------------------------------
+    // A transfer to the IRQ address, with IRQ9 enabled, latches SPUSTAT bit 6
+    // and pulls the CPU SPU interrupt line.
+    psx_spu_reset();
+    cpu.i_stat = 0;
+    wr16(IRQ_ADDR, 0x1000 / 8);        // IRQ at sound-RAM byte 0x1000
+    wr16(SPUCNT, 0x0040);              // IRQ9 enable
+    wr16(XFER_ADDR, 0x1000 / 8);
+    wr16(XFER_FIFO, 0x1234);          // write the IRQ address -> trigger
+    check("irq transfer i_stat", (cpu.i_stat >> 9) & 1, 1);
+    check("irq transfer SPUSTAT.6", (psx_spu_read(SPU_BASE + SPUSTAT, 2) >> 6) & 1, 1);
+
+    // Acknowledge: writing SPUCNT with IRQ9 disabled clears the flag.
+    wr16(SPUCNT, 0x0000);
+    check("irq ack clears SPUSTAT.6", (psx_spu_read(SPU_BASE + SPUSTAT, 2) >> 6) & 1, 0);
+
+    // A transfer away from the IRQ address does not trigger.
+    psx_spu_reset();
+    cpu.i_stat = 0;
+    wr16(IRQ_ADDR, 0x1000 / 8);
+    wr16(SPUCNT, 0x0040);
+    wr16(XFER_ADDR, 0x2000 / 8);
+    wr16(XFER_FIFO, 0x1234);
+    check("irq no-match i_stat", (cpu.i_stat >> 9) & 1, 0);
+
+    // With IRQ9 disabled, touching the address does not trigger.
+    psx_spu_reset();
+    cpu.i_stat = 0;
+    wr16(IRQ_ADDR, 0x1000 / 8);
+    wr16(SPUCNT, 0x0000);              // IRQ9 disabled
+    wr16(XFER_ADDR, 0x1000 / 8);
+    wr16(XFER_FIFO, 0x1234);
+    check("irq disabled i_stat", (cpu.i_stat >> 9) & 1, 0);
+
+    // A voice reading the IRQ address block triggers the IRQ during decode.
+    psx_spu_reset();
+    cpu.i_stat = 0;
+    wr16(MAINVOL_L, 0x7FFF);
+    wr16(MAINVOL_R, 0x7FFF);
+    wr16(XFER_ADDR, 0x1000 / 8);       // upload a looping block at 0x1000
+    wr16(XFER_FIFO, 0x0300);
+    for (int i = 0; i < 7; i++) {
+        wr16(XFER_FIFO, 0x1111);
+    }
+    wr16(IRQ_ADDR, 0x1000 / 8);
+    wr16(SPUCNT, 0x0040);              // IRQ9 enable
+    wr16(0x0, 0x7FFF);                 // voice 0 volume L
+    wr16(0x2, 0x7FFF);                 // volume R
+    wr16(0x4, 0x1000);                 // pitch
+    wr16(0x6, 0x1000 / 8);            // start
+    wr16(0x8, 0x000F);                 // fast attack, sustain max
+    wr32(KON, 0x00000001);
+    tick_samples(64);
+    check("irq voice read i_stat", (cpu.i_stat >> 9) & 1, 1);
+
     if (failures) {
         fprintf(stderr, "SPU test: %d failures\n", failures);
         return 1;
@@ -380,5 +442,6 @@ main(void)
     printf("PASS: volume sweep ramps up (early=%ld late=%ld)\n", early, late);
     printf("PASS: CD audio routes through reverb (%d/%d samples differ)\n",
            cd_diff, 4000 * 2);
+    printf("PASS: sound-RAM IRQ triggers on transfer and voice read\n");
     return 0;
 }

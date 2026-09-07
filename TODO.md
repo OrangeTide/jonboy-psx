@@ -68,11 +68,14 @@ card address report no device.
   is dropped rather than delivered to the CPU; with the filter off, every audio
   sector plays. CD audio can be routed through reverb: when the SPUCNT CD-reverb
   bit (0x04) is set, the CD-volume-scaled CD/XA audio feeds the reverb input
-  alongside the reverb-enabled voices, so its wet output adds to the mix. Not
-  modeled yet: the SPU IRQ on a sound-RAM address, sweeps on the CD and reverb
-  output volumes, 8-bit XA (levels A, decoded as silence for now), and the coarser
-  hardware XA interleave timing. Voice mixing uses linear interpolation rather
-  than the hardware Gaussian.
+  alongside the reverb-enabled voices, so its wet output adds to the mix. The
+  sound-RAM IRQ (interrupt 9) is in: when SPUCNT bit 6 enables it, a voice ADPCM
+  block read or a transfer-port access that touches the IRQ-address register
+  (0x1F801DA4) latches SPUSTAT bit 6 and pulls the CPU SPU interrupt line; writing
+  SPUCNT with the enable bit clear acknowledges it. Not modeled yet: sweeps on the
+  CD and reverb output volumes, 8-bit XA (levels A, decoded as silence for now),
+  and the coarser hardware XA interleave timing. Voice mixing uses linear
+  interpolation rather than the hardware Gaussian.
 
 ## Storage
 

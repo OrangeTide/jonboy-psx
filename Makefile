@@ -63,7 +63,7 @@ clean ::
 	$(RM) $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa
 $(BINDIR)/test_cdda : test_cdda.c cdrom.c xa.c cdrom.h cpu.h mem.h spu.h xa.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_cdda.c cdrom.c xa.c
-$(BINDIR)/test_spu : test_spu.c spu.c spu.h lebytes.h | $(BINDIR)
+$(BINDIR)/test_spu : test_spu.c spu.c spu.h cpu.h lebytes.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_spu.c spu.c
 $(BINDIR)/test_xa : test_xa.c xa.c xa.h spu.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_xa.c xa.c

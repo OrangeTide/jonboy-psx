@@ -1,4 +1,5 @@
 #include "spu.h"
+#include "cpu.h"
 #include "lebytes.h"
 
 #include <string.h>
@@ -31,6 +32,7 @@
 #define KON_OFFSET        0x188 // Key On  (32-bit, voices 0..23)
 #define KOFF_OFFSET       0x18C // Key Off (32-bit)
 #define ENDX_OFFSET       0x19C // voice end flags (read)
+#define IRQ_ADDR_OFFSET   0x1A4 // sound RAM IRQ address (8-byte units)
 #define TRANSFER_ADDR_OFF 0x1A6 // sound RAM transfer address (8-byte units)
 #define TRANSFER_FIFO_OFF 0x1A8 // sound RAM transfer FIFO (PIO write port)
 #define SPUCNT_OFFSET     0x1AA
@@ -47,6 +49,7 @@ static uint8_t spu_regs[SPU_SIZE];
 static uint8_t spu_ram[SPU_RAM_SIZE];
 static uint32_t spu_xfer_addr;   // current sound-RAM transfer pointer (bytes)
 static uint32_t spu_endx;        // voice end flags
+static int spu_irq_flag;         // sound-RAM IRQ (interrupt 9) latched, SPUSTAT.6
 
 typedef enum { ENV_OFF, ENV_ATTACK, ENV_DECAY, ENV_SUSTAIN, ENV_RELEASE } EnvState;
 
@@ -190,6 +193,7 @@ psx_spu_reset(void)
     spu_noise_count = 0;
     spu_xfer_addr = 0;
     spu_endx = 0;
+    spu_irq_flag = 0;
     spu_ring_w = spu_ring_r = 0;
     cd_fifo_w = cd_fifo_r = 0;
     spu_cycle_acc = 0;
@@ -206,6 +210,28 @@ clamp16(int v)
         return 32767;
     }
     return (int16_t)v;
+}
+
+// Sound-RAM IRQ (interrupt 9). When IRQ9 is enabled in SPUCNT (bit 6) and the
+// SPU touches the sound-RAM address in the IRQ register, it latches SPUSTAT bit 6
+// and pulls the CPU interrupt line. addr is a byte address in sound RAM and len
+// the number of bytes touched by the access (an ADPCM block read or a transfer
+// word). Voices and the transfer port call this on every sound-RAM access.
+static void
+spu_check_irq(uint32_t addr, uint32_t len)
+{
+    if (!(load_sized(spu_regs, SPUCNT_OFFSET, 2) & 0x0040)) {
+        return; // IRQ9 disabled
+    }
+
+    uint32_t irq = ((uint32_t)load_sized(spu_regs, IRQ_ADDR_OFFSET, 2) * 8) &
+                   (SPU_RAM_SIZE - 1);
+    addr &= (SPU_RAM_SIZE - 1);
+
+    if (irq >= addr && irq < addr + len) {
+        spu_irq_flag = 1;
+        cpu.i_stat |= (1u << IRQ_SPU);
+    }
 }
 
 // A volume register is a signed level in fixed mode; the sweep mode (bit15) is
@@ -301,6 +327,7 @@ static const int adpcm_filter_neg[5] = { 0, 0, -52, -55, -60 };
 static void
 decode_block(Voice *ch)
 {
+    spu_check_irq(ch->cur_addr, ADPCM_BLOCK); // voice read of this sound-RAM block
     const uint8_t *b = &spu_ram[ch->cur_addr & (SPU_RAM_SIZE - 1)];
     int shift = b[0] & 0x0F;
     int filter = (b[0] >> 4) & 0x07;
@@ -690,9 +717,11 @@ psx_spu_read(uint32_t phys_addr, int size)
         return 0;
     }
 
-    // SPUSTAT mirrors the low 6 bits of SPUCNT (the current transfer mode).
+    // SPUSTAT mirrors the low 6 bits of SPUCNT (the current transfer mode) and
+    // reports the sound-RAM IRQ flag in bit 6.
     if (off == SPUSTAT_OFFSET) {
-        return load_sized(spu_regs, SPUCNT_OFFSET, 2) & 0x3F;
+        return (load_sized(spu_regs, SPUCNT_OFFSET, 2) & 0x3F) |
+               (spu_irq_flag ? 0x40 : 0);
     }
     // ENDX reports which voices have reached a loop-end block.
     if (off == ENDX_OFFSET || off == ENDX_OFFSET + 2) {
@@ -779,6 +808,14 @@ psx_spu_write(uint32_t phys_addr, uint32_t value, int size)
 
     store_sized(spu_regs, off, value, size);
 
+    if (off == SPUCNT_OFFSET) {
+        // Writing SPUCNT with the IRQ9-enable bit clear acknowledges (resets) the
+        // latched sound-RAM IRQ flag. Games clear then re-set the bit to ack.
+        if (!(value & 0x0040)) {
+            spu_irq_flag = 0;
+        }
+        return;
+    }
     if (off == TRANSFER_ADDR_OFF) {
         spu_xfer_addr = (value & 0xFFFF) * 8;
         return;
@@ -806,6 +843,7 @@ psx_spu_write(uint32_t phys_addr, uint32_t value, int size)
 void
 spu_transfer_write(uint16_t v)
 {
+    spu_check_irq(spu_xfer_addr, 2);
     store_sized(spu_ram, spu_xfer_addr & (SPU_RAM_SIZE - 1), v, 2);
     spu_xfer_addr = (spu_xfer_addr + 2) & (SPU_RAM_SIZE - 1);
 }
@@ -813,6 +851,7 @@ spu_transfer_write(uint16_t v)
 uint16_t
 spu_transfer_read(void)
 {
+    spu_check_irq(spu_xfer_addr, 2);
     uint16_t v = (uint16_t)load_sized(spu_ram, spu_xfer_addr & (SPU_RAM_SIZE - 1), 2);
     spu_xfer_addr = (spu_xfer_addr + 2) & (SPU_RAM_SIZE - 1);
     return v;
