@@ -58,9 +58,13 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
   selected PS-EXE (deferred until the kernel is up). Wired through mem.c; the
   directory comes from --games. Verified end to end: a stub loader ROM boots
   Cube.exe from the menu index.
-- [ ] on-screen menu: replace the auto-boot stub with a real guest loader (C via
-  mipsel-gcc) that draws the game list, moves a cursor with the D-pad, and boots
-  on X. Add it to the build so make produces the loader ROM.
+- [x] on-screen menu: loader/main.c (C via mipsel-gcc, make builds _out/loader.exe)
+  brings up the GPU, enumerates images over the backdoor, draws the list with an
+  embedded 8x8 font, moves a cursor with the D-pad, and boots on X. Verified end
+  to end (D-pad + Cross selects and boots the highlighted game). Run it with
+  --boot --sideload _out/loader.exe --games <dir>.
+  - [ ] auto-sideload the loader when --games is set (no explicit --sideload)
+  - [ ] scroll when there are more entries than fit on screen
 - [ ] CD image support: index .bin/.cue/.iso and boot them via the game-execution
   path (trap the stock CD-ROM registers 0x1F801800-3 and serve sectors).
   Depends on cd-rom support above.
