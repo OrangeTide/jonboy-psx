@@ -39,19 +39,21 @@ handshake (0x01 poll, 0x42 read, 0x5A sync, then the per-device payload).
 - [ ] add cd-rom support. cdrom.c implements the register interface and command
   handshake but always reports "no disc". Remaining: load a disc image (cue/bin
   or iso), map LBA to sectors, and deliver sector data.
-- [~] add PSIO support. psio.c models the menu-mode parallel-port interface in
-  Expansion Region 1 (0x1F000000): a data-port FIFO (0x00), status/command
-  (0x04), and an IRQ latch (0x08), with status bits RX_READY / TX_FREE / BUSY /
-  SD_INSERTED. Commands are 12-byte packets (id, flags, block count, LBA, XOR
-  checksum) streamed into the data port then strobed; READ_SECTOR streams the
-  requested blocks back through the FIFO, or leaves the file positioned for DMA
-  channel 3 when the DMA flag is set. Protocol is documented in psio.h.
-  Registers were derived from research notes, not yet verified against real
-  firmware; see the caveats below.
-  - [ ] verify the register map, packet format, and IRQ/ack semantics against
-    the real ps-iowned / lite_menu source (current model is doc-based)
-  - [ ] boot the REF/loader-beta-test MENU.SYS (needs the EXP1 boot ROM path and
-    correct polling-loop timing; instant transfers can hang the firmware)
+- [~] add PSIO support. psio.c presents the cartridge as a ROM in Expansion
+  Region 1 (0x1F000000), which is how a real PSIO takes control: the BIOS checks
+  the boot-hook signature ("Licensed by Sony Computer Entertainment Inc.") at
+  0x1F000084 (pre) / 0x1F000004 (post) and, on a match, calls the function
+  pointer stored just before it (0x1F000080 / 0x1F000000). Verified against the
+  scph5501 BIOS: with a firmware ROM carrying the signature and a vector, the
+  BIOS jumps to the vector and runs cartridge code. Offsets are in psio.h. The
+  earlier doc-based FIFO/status register model was wrong (0x1F000004 is the
+  signature, not a status register) and has been removed.
+  - [ ] menu<->MCU command protocol for reading SD data. Not documented in any
+    open source (lite_menu ships no firmware source, ps-iowned/loader is a
+    not-started RE stub). Must be reverse-engineered from the REF/loader-beta-test
+    MENU.SYS binaries, or via a custom loader that defines its own protocol.
+  - [ ] boot the REF/loader-beta-test MENU.SYS (needs the command protocol above,
+    plus correct polling-loop timing; instant transfers can hang the firmware)
   - [ ] game-execution path: trap the stock CD-ROM registers (0x1F801800-3) and
     serve sectors from the ISO the menu selected
   - [ ] read from FAT32 image (parse the filesystem, not just a raw image)
