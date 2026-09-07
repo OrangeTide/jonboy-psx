@@ -74,7 +74,7 @@ dma_psio_read(int channel)
         memset(&system_ram[madr + got], 0, bytes - got);
     }
 
-    psio.status_reg &= ~0x01u; // clear BUSY
+    psio.status_reg |= PSIO_STATUS_READY; // transfer complete, device idle
 }
 
 // Walk a GPU command linked list (SyncMode 2). Each node is a header word whose

@@ -39,9 +39,13 @@ handshake (0x01 poll, 0x42 read, 0x5A sync, then the per-device payload).
 - [ ] add cd-rom support. cdrom.c implements the register interface and command
   handshake but always reports "no disc". Remaining: load a disc image (cue/bin
   or iso), map LBA to sectors, and deliver sector data.
-- [ ] add PSIO support. psio.c mounts a raw image file (load_virtual_sd_card)
-  and DMA channel 3 streams words from it, but the command register decode
-  (mount, seek, read sector, report status) and the LBA-to-offset mapping are
-  still TODO in psio.c.
+- [~] add PSIO support. psio.c mounts a raw image file (load_virtual_sd_card),
+  and the register interface now decodes commands: a LBA write seeks the image,
+  the READ_SECTOR command loads a 2048-byte sector into the FIFO (auto-advancing
+  the LBA), and the status register reports READY / DATA / ERROR. DMA channel 3
+  still streams bulk words from the seeked position. Protocol is documented in
+  psio.h (PSIO_CMD_* / PSIO_STATUS_*).
+  - [ ] richer command set as the firmware needs it (multi-sector read, status
+    query, mount/eject), driven by what the actual PSIO firmware issues
   - [ ] read from FAT32 image (parse the filesystem, not just a raw image)
   - [ ] read from a hosted directory
