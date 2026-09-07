@@ -34,11 +34,41 @@
 #define QUEUE_MAX 8
 #define RAW_SECTOR 2352
 
+// The pregap that precedes LBA 0. An MSF address of 00:02:00 is LBA 0, so a
+// disc-relative LBA maps to a file sector index directly.
+#define LEAD_IN_FRAMES 150
+
+#define MAX_TRACKS 100
+#define MAX_FILES  100
+
 typedef struct {
     uint8_t type;
     uint8_t len;
     uint8_t data[FIFO_MAX];
 } Response;
+
+// One track of the mounted disc. start_lba is the absolute (disc) LBA of the
+// track's INDEX 01; file_start_lba is the absolute LBA that maps to byte 0 of
+// the backing file, so a sector at absolute LBA n lives at file byte
+// (n - file_start_lba) * RAW_SECTOR.
+typedef struct {
+    int num;
+    int is_audio;
+    int start_lba;
+    int file_start_lba;
+    int file_idx;
+} Track;
+
+// Mounted disc image. Kept apart from the controller state in cd so a reset,
+// which clears cd, does not eject the disc.
+static struct {
+    int has_disc;
+    FILE *files[MAX_FILES];
+    int num_files;
+    Track tracks[MAX_TRACKS];
+    int num_tracks;
+    int lead_out_lba;       // absolute LBA just past the last track
+} disc;
 
 static struct {
     uint8_t index;
@@ -60,10 +90,7 @@ static struct {
     int busy;
     int deliver_delay;
 
-    // Disc image and read state.
-    FILE *disc;
-    long track_offset;      // byte offset of track 1 in the file
-    int has_disc;
+    // Read state.
     uint8_t mode;           // Setmode value (bit5 = whole 2340-byte sector)
     int seek_lba;           // target set by Setloc
     int read_lba;           // next sector a read will deliver
@@ -85,79 +112,220 @@ bcd2bin(uint8_t b)
     return (b >> 4) * 10 + (b & 0x0F);
 }
 
+static uint8_t
+bin2bcd(int v)
+{
+    return (uint8_t)(((v / 10) << 4) | (v % 10));
+}
+
 void
 psx_cdrom_reset(void)
 {
-    FILE *disc = cd.disc;
-    long off = cd.track_offset;
-    int has = cd.has_disc;
-
+    // The disc image lives in its own struct, so clearing the controller state
+    // does not eject it.
     memset(&cd, 0, sizeof cd);
-
-    // A reset must not eject the mounted image.
-    cd.disc = disc;
-    cd.track_offset = off;
-    cd.has_disc = has;
 }
 
 int
 cdrom_has_disc(void)
 {
-    return cd.has_disc;
+    return disc.has_disc;
+}
+
+// The track that contains an absolute LBA, or the last track for an LBA past the
+// end. Returns NULL when no disc is mounted.
+static Track *
+track_at_lba(int lba)
+{
+    if (disc.num_tracks == 0) {
+        return NULL;
+    }
+
+    for (int i = disc.num_tracks - 1; i >= 0; i--) {
+        if (lba >= disc.tracks[i].start_lba) {
+            return &disc.tracks[i];
+        }
+    }
+    return &disc.tracks[0];
+}
+
+// Sector count of an open image file.
+static long
+file_sectors(FILE *f)
+{
+    long sz;
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        return 0;
+    }
+    sz = ftell(f);
+    return sz > 0 ? sz / RAW_SECTOR : 0;
+}
+
+// Parse an "mm:ss:ff" cue address into a frame count, or -1 on failure.
+static int
+parse_msf(const char *s)
+{
+    int m = 0, sec = 0, f = 0;
+
+    if (sscanf(s, "%d:%d:%d", &m, &sec, &f) != 3) {
+        return -1;
+    }
+    return (m * 60 + sec) * 75 + f;
+}
+
+// Close the mounted image and clear the disc state.
+static void
+disc_eject(void)
+{
+    for (int i = 0; i < disc.num_files; i++) {
+        if (disc.files[i]) {
+            fclose(disc.files[i]);
+        }
+    }
+    memset(&disc, 0, sizeof disc);
+}
+
+// Mount a raw single-file image (.bin/.iso) as one data track at LBA 0.
+static int
+mount_raw(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); return -1; }
+
+    disc.files[0] = f;
+    disc.num_files = 1;
+
+    disc.tracks[0].num = 1;
+    disc.tracks[0].is_audio = 0;
+    disc.tracks[0].start_lba = 0;
+    disc.tracks[0].file_start_lba = 0;
+    disc.tracks[0].file_idx = 0;
+    disc.num_tracks = 1;
+
+    disc.lead_out_lba = (int)file_sectors(f);
+    disc.has_disc = 1;
+    return 0;
+}
+
+// Parse a .cue sheet into the track table. Handles a single .bin holding every
+// track (tracks laid out by their INDEX 01 times) and one .bin per track (files
+// laid end to end). INDEX 00 pregaps and PREGAP/POSTGAP are not tracked; INDEX
+// 01 gives each track's start.
+static int
+mount_cue(const char *path)
+{
+    FILE *cue = fopen(path, "r");
+    if (!cue) { perror(path); return -1; }
+
+    const char *slash = strrchr(path, '/');
+    int dirlen = slash ? (int)(slash - path + 1) : 0;
+
+    char line[512];
+    int cur_file = -1;          // index into disc.files of the current FILE
+    long cur_base_lba = 0;      // absolute LBA at byte 0 of the current file
+    int track_num = 0;
+    int track_audio = 0;
+    int have_track = 0;
+
+    while (fgets(line, sizeof line, cue)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+
+        if (strncmp(p, "FILE", 4) == 0) {
+            char *q1 = strchr(p, '"');
+            char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+            if (!q1 || !q2) {
+                continue;
+            }
+
+            char name[512];
+            size_t len = (size_t)(q2 - q1 - 1);
+            if (len >= sizeof name) {
+                len = sizeof name - 1;
+            }
+            memcpy(name, q1 + 1, len);
+            name[len] = '\0';
+
+            // Resolve the FILE only within the cue's own directory. Reduce the
+            // reference to its base name so a hostile cue cannot reach outside
+            // that directory with an absolute path or a ".." component.
+            char *base = name;
+            for (char *s = name; *s; s++) {
+                if (*s == '/' || *s == '\\') {
+                    base = s + 1;
+                }
+            }
+
+            char full[1024];
+            snprintf(full, sizeof full, "%.*s%s", dirlen, path, base);
+            FILE *f = fopen(full, "rb");
+            if (!f) { perror(full); fclose(cue); disc_eject(); return -1; }
+
+            // Lay this file after the previous one on the disc timeline.
+            if (disc.num_files > 0) {
+                cur_base_lba += file_sectors(disc.files[disc.num_files - 1]);
+            }
+            if (disc.num_files < MAX_FILES) {
+                cur_file = disc.num_files;
+                disc.files[disc.num_files++] = f;
+            } else {
+                fclose(f);
+            }
+        } else if (strncmp(p, "TRACK", 5) == 0) {
+            char type[32] = {0};
+            track_num = 0;
+            sscanf(p + 5, "%d %31s", &track_num, type);
+            track_audio = (strncmp(type, "AUDIO", 5) == 0);
+            have_track = 1;
+        } else if (strncmp(p, "INDEX", 5) == 0 && have_track) {
+            int idx = 0;
+            char msf[32] = {0};
+            if (sscanf(p + 5, "%d %31s", &idx, msf) != 2 || idx != 1) {
+                continue;
+            }
+
+            int frames = parse_msf(msf);
+            if (frames < 0) {
+                frames = 0;
+            }
+            if (disc.num_tracks < MAX_TRACKS && cur_file >= 0) {
+                Track *t = &disc.tracks[disc.num_tracks++];
+                t->num = track_num;
+                t->is_audio = track_audio;
+                t->file_idx = cur_file;
+                t->file_start_lba = (int)cur_base_lba;
+                t->start_lba = (int)cur_base_lba + frames;
+            }
+            have_track = 0;
+        }
+    }
+    fclose(cue);
+
+    if (disc.num_tracks == 0 || disc.num_files == 0) {
+        fprintf(stderr, "%s: no tracks in cue\n", path);
+        disc_eject();
+        return -1;
+    }
+
+    disc.lead_out_lba = (int)(cur_base_lba +
+                              file_sectors(disc.files[disc.num_files - 1]));
+    disc.has_disc = 1;
+    return 0;
 }
 
 int
 cdrom_mount(const char *path)
 {
-    char binpath[1024];
-    const char *toopen = path;
     size_t n = strlen(path);
+    int is_cue = n > 4 && (strcmp(path + n - 4, ".cue") == 0 ||
+                           strcmp(path + n - 4, ".CUE") == 0);
 
-    // A .cue names its .bin; open that instead (single-track images only).
-    if (n > 4 && (strcmp(path + n - 4, ".cue") == 0 ||
-                  strcmp(path + n - 4, ".CUE") == 0)) {
-        FILE *cue = fopen(path, "r");
-        if (!cue) { perror(path); return -1; }
+    disc_eject();
 
-        char line[512];
-        char binname[512] = {0};
-        while (fgets(line, sizeof line, cue)) {
-            char *q1 = strchr(line, '"');
-            char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
-            if (q1 && q2) {
-                size_t len = (size_t)(q2 - q1 - 1);
-                if (len < sizeof binname) {
-                    memcpy(binname, q1 + 1, len);
-                    binname[len] = '\0';
-                }
-                break;
-            }
-        }
-        fclose(cue);
-
-        if (binname[0] == '\0') {
-            fprintf(stderr, "%s: no FILE entry in cue\n", path);
-            return -1;
-        }
-
-        // Resolve the .bin relative to the .cue's directory.
-        const char *slash = strrchr(path, '/');
-        int dirlen = slash ? (int)(slash - path + 1) : 0;
-        snprintf(binpath, sizeof binpath, "%.*s%s", dirlen, path, binname);
-        toopen = binpath;
-    }
-
-    FILE *f = fopen(toopen, "rb");
-    if (!f) { perror(toopen); return -1; }
-
-    if (cd.disc) {
-        fclose(cd.disc);
-    }
-
-    cd.disc = f;
-    cd.track_offset = 0;
-    cd.has_disc = 1;
-    return 0;
+    return is_cue ? mount_cue(path) : mount_raw(path);
 }
 
 static uint8_t
@@ -225,16 +393,18 @@ load_sector(void)
     cd.data_ptr = 0;
     cd.sector_started = 0;
 
-    if (!cd.disc) {
+    Track *t = track_at_lba(cd.read_lba);
+    if (!t) {
         return;
     }
 
-    long pos = cd.track_offset + (long)cd.read_lba * RAW_SECTOR;
-    if (fseek(cd.disc, pos, SEEK_SET) != 0) {
+    FILE *f = disc.files[t->file_idx];
+    long pos = (long)(cd.read_lba - t->file_start_lba) * RAW_SECTOR;
+    if (fseek(f, pos, SEEK_SET) != 0) {
         return;
     }
 
-    size_t got = fread(raw, 1, RAW_SECTOR, cd.disc);
+    size_t got = fread(raw, 1, RAW_SECTOR, f);
     if (got < RAW_SECTOR) {
         memset(raw + got, 0, RAW_SECTOR - got);
     }
@@ -314,6 +484,31 @@ run_command(uint8_t cmd)
         enqueue(INT2, stat, 1);
         break;
 
+    case 0x13: { // GetTN: first and last track numbers (BCD)
+        int first = disc.num_tracks ? disc.tracks[0].num : 1;
+        int last = disc.num_tracks ? disc.tracks[disc.num_tracks - 1].num : 1;
+        uint8_t tn[3] = { status_byte(), bin2bcd(first), bin2bcd(last) };
+        enqueue(INT3, tn, 3);
+        break;
+    }
+
+    case 0x14: { // GetTD: start MSF of a track (BCD); track 0 = lead-out
+        int want = cd.param_count > 0 ? bcd2bin(cd.param_fifo[0]) : 0;
+        int lba = disc.lead_out_lba;
+        for (int i = 0; i < disc.num_tracks; i++) {
+            if (disc.tracks[i].num == want) {
+                lba = disc.tracks[i].start_lba;
+                break;
+            }
+        }
+        int frame = lba + LEAD_IN_FRAMES;
+        int m = frame / (60 * 75);
+        int s = (frame / 75) % 60;
+        uint8_t td[3] = { status_byte(), bin2bcd(m), bin2bcd(s) };
+        enqueue(INT3, td, 3);
+        break;
+    }
+
     case 0x0C: // Demute
     case 0x0B: // Mute
     case 0x0D: // Setfilter
@@ -335,7 +530,7 @@ run_command(uint8_t cmd)
 
     case 0x1A: // GetID
         enqueue(INT3, stat, 1);
-        if (cd.has_disc) {
+        if (disc.has_disc) {
             // Licensed disc: flags 0, type 0x20 (mode2 data), region "SCEA".
             uint8_t id[8] = { STAT_MOTOR, 0x00, 0x20, 0x00, 'S', 'C', 'E', 'A' };
             enqueue(INT2, id, 8);

@@ -47,18 +47,21 @@ card address report no device.
 
 Next up (in order):
 
-- [ ] multi-track .cue images. cdrom_mount today reads only the first quoted
-  FILE name and sets a single track_offset of 0, so audio tracks and any layout
-  past track 1 are invisible. Parse every TRACK and its INDEX lines, building a
-  track table: track number, type (MODE1/MODE2 data vs AUDIO), the INDEX 00
-  pregap, and the INDEX 01 start. Support both a single .bin addressed by byte
-  offset and one FILE per track. From the table:
-  - map an LBA to its track and know whether that track is data or audio.
-  - add GetTN (0x13): reply with first and last track numbers in BCD.
-  - add GetTD (0x14): given a track number, reply with that track's start MSF
-    in BCD (track 0 asks for the lead-out).
-  This is the prerequisite for CD-DA, which needs to locate and classify audio
-  tracks.
+- [x] multi-track .cue images. cdrom.c now parses every FILE/TRACK/INDEX into a
+  track table (number, data-vs-audio type, absolute INDEX 01 start LBA, and the
+  file plus its base LBA), kept in a disc struct separate from the controller so
+  a reset does not eject it. Supports a single .bin holding every track (laid out
+  by INDEX 01 times) and one .bin per track (files laid end to end). Reads route
+  through track_at_lba, so the file and byte offset come from the containing
+  track. Added GetTN (0x13, first/last track in BCD) and GetTD (0x14, a track's
+  start MSF in BCD; track 0 gives the lead-out). Security: a FILE reference is
+  reduced to its base name and resolved only within the cue's own directory, so a
+  hostile cue cannot reach outside it with an absolute path or a ".." component.
+  Verified: single-bin and multi-bin layouts parse with correct start/lead-out
+  LBAs, a malicious absolute/traversal path is contained, and Final Fantasy
+  Tactics and Chrono Trigger still boot and run through the new read path. Not
+  done: INDEX 00 pregaps and PREGAP/POSTGAP are not tracked (INDEX 01 gives each
+  track start), which is fine for data boot and enough for CD-DA positioning.
 
 - [ ] audio-track (CD-DA) playback for games that stream music. Depends on the
   track table above and on an SPU audio output path (see Audio below); until the
