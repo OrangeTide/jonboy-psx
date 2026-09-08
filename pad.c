@@ -16,6 +16,14 @@
 #define DEV_PAD  1
 #define DEV_CARD 2
 
+// The addressed device pulses its acknowledge a short time after each byte is
+// clocked, not on the same cycle. Drivers (and the BIOS) clear the SIO0
+// interrupt right after writing a byte and only then wait for this acknowledge,
+// so raising it synchronously would let that clear swallow it. This delay, in
+// CPU cycles, only needs to outlast the write-then-clear window while staying
+// well within the drivers' acknowledge timeouts.
+#define SIO_ACK_DELAY_CYCLES 100
+
 // JOY_STAT bits.
 #define STAT_TX_READY_1  0x01 // ready to accept a byte in the transmit register
 #define STAT_RX_NONEMPTY 0x02 // a received byte is waiting in the FIFO
@@ -44,6 +52,7 @@ static struct {
     uint8_t rx_data;  // last byte shifted back from the device
     int rx_ready;     // a received byte is waiting to be read
     int irq;          // acknowledge interrupt latched (JOY_STAT bit9)
+    int ack_delay;    // cycles until the pending device acknowledge fires (0=none)
     int xfer_pos;     // byte index within the current transaction
     int device;       // which device is answering (DEV_*)
     uint16_t mode;
@@ -75,12 +84,29 @@ pad_analog_mode(void)
     return pad.analog_mode;
 }
 
+// Advance the pending device acknowledge. Called every step from the hardware
+// tick so a scheduled /ACK fires a fixed delay after its byte, letting the SIO0
+// interrupt survive the driver's clear-then-wait sequence.
+void
+psx_pad_tick(uint32_t cycles)
+{
+    if (sio.ack_delay > 0) {
+        sio.ack_delay -= (int)cycles;
+        if (sio.ack_delay <= 0) {
+            sio.ack_delay = 0;
+            sio.irq = 1;
+            cpu.i_stat |= (1u << IRQ_PAD); // device acknowledge -> SIO0 interrupt
+        }
+    }
+}
+
 void
 psx_pad_reset(void)
 {
     sio.rx_data = 0xFF;
     sio.rx_ready = 0;
     sio.irq = 0;
+    sio.ack_delay = 0;
     sio.xfer_pos = 0;
     sio.device = DEV_NONE;
     sio.mode = 0;
@@ -347,8 +373,10 @@ psx_pad_write(uint32_t phys_addr, uint32_t value, int size)
         sio.xfer_pos++;
 
         if (ack) {
-            sio.irq = 1;
-            cpu.i_stat |= (1u << IRQ_PAD); // device acknowledge -> SIO0 interrupt
+            // Schedule the acknowledge to fire a little later, the way real
+            // hardware pulses /ACK after the byte completes. psx_pad_tick raises
+            // the SIO0 interrupt when the delay elapses.
+            sio.ack_delay = SIO_ACK_DELAY_CYCLES;
         }
         break;
     }
@@ -372,6 +400,7 @@ psx_pad_write(uint32_t phys_addr, uint32_t value, int size)
             sio.xfer_pos = 0;
             sio.device = DEV_NONE;
             sio.rx_ready = 0;
+            sio.ack_delay = 0;
         }
         break;
     }

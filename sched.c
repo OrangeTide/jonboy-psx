@@ -38,4 +38,5 @@ psx_hardware_tick(uint32_t cycles)
     psx_cdrom_tick(cycles);
     psx_dma_tick(cycles);
     psx_spu_tick(cycles);
+    psx_pad_tick(cycles);
 }

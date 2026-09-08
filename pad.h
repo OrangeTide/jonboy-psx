@@ -47,6 +47,7 @@ int  pad_analog_mode(void);
 
 uint32_t psx_pad_read(uint32_t phys_addr, int size);
 void psx_pad_write(uint32_t phys_addr, uint32_t value, int size);
+void psx_pad_tick(uint32_t cycles);
 void psx_pad_reset(void);
 
 #endif
