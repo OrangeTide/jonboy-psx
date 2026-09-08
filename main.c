@@ -59,6 +59,85 @@ static const char *g_memcard_path = NULL;    // memory-card image (raw 128 KB)
 
 int SDLCALL jonboy_runapp(int argc, char *argv[]);
 
+// Shell entry point: the BIOS reaches it once the kernel is fully initialized.
+#define KERNEL_SHELL_ENTRY 0x80030000
+
+// Default loader menu program, auto-sideloaded when --games is set without an
+// explicit --sideload. Relative to the working directory, matching the build.
+#define LOADER_DEFAULT_PATH "_out/loader.exe"
+
+// Service the sideload-at-kernel-up and loader menu boot requests. Called once
+// per CPU step (before step_cpu) from both the headless and windowed run loops,
+// so the loader behaves the same in each. *kernel_up and *sideloaded track boot
+// progress across calls.
+static void
+service_loader_boot(int *kernel_up, int *sideloaded)
+{
+    if (cpu.PC == KERNEL_SHELL_ENTRY) {
+        *kernel_up = 1;
+    }
+
+    // Sideload a PS-EXE over the booted kernel once it reaches the shell entry.
+    if (g_sideload_exe && !*sideloaded && cpu.PC == KERNEL_SHELL_ENTRY) {
+        uint32_t pc, gp, sp;
+
+        if (mem_load_exe(g_sideload_exe, &pc, &gp, &sp) != 0) {
+            fprintf(stderr, "sideload: failed to load %s\n", g_sideload_exe);
+            g_sideload_exe = NULL; // do not retry every step
+            return;
+        }
+
+        cpu.PC = pc;
+        cpu.next_pc = pc + 4;
+        cpu.regs[28] = gp;
+        cpu.regs[29] = sp;
+        cpu.regs[30] = sp;
+        *sideloaded = 1;
+        printf("Sideloaded %s at PC=0x%08X\n", g_sideload_exe, pc);
+        return;
+    }
+
+    // The guest menu picked an image and strobed the boot command.
+    if (loader_boot_pending() && *kernel_up) {
+        const char *path = loader_boot_path();
+
+        if (loader_boot_is_cd()) {
+            // A CD image boots the way a real disc does: mount it, then reset the
+            // machine so the BIOS runs its disc boot sequence. Stop re-sideloading
+            // the menu, and clear RAM and hardware so the reboot starts clean.
+            if (path && cdrom_mount(path) == 0) {
+                printf("Loader mounting disc %s, rebooting\n", path);
+                g_sideload_exe = NULL;
+                *sideloaded = 0;
+                *kernel_up = 0;
+                memset(system_ram, 0, RAM_SIZE);
+                psx_hardware_reset();
+                cpu_reset(0xBFC00000);
+            } else {
+                fprintf(stderr, "loader: failed to mount %s\n",
+                        path ? path : "(none)");
+            }
+        } else {
+            // A PS-EXE loads over RAM and jumps to its entry.
+            uint32_t pc, gp, sp;
+
+            if (path && mem_load_exe(path, &pc, &gp, &sp) == 0) {
+                cpu.PC = pc;
+                cpu.next_pc = pc + 4;
+                cpu.regs[28] = gp;
+                cpu.regs[29] = sp;
+                cpu.regs[30] = sp;
+                printf("Loader booted %s at PC=0x%08X\n", path, pc);
+            } else {
+                fprintf(stderr, "loader: failed to boot %s\n",
+                        path ? path : "(none)");
+            }
+        }
+
+        loader_clear_boot();
+    }
+}
+
 // Simple application state structure
 typedef struct {
     SDL_Window *window;
@@ -222,8 +301,25 @@ jonboy_runapp(int argc, char *argv[])
         printf("Memory card %s\n", g_memcard_path);
     }
 
+    if (g_games_dir) {
+        loader_set_games_dir(g_games_dir);
+    }
+
+    if (g_cd_path) {
+        if (cdrom_mount(g_cd_path) == 0) {
+            printf("Mounted disc %s\n", g_cd_path);
+        } else {
+            fprintf(stderr, "cd: failed to mount %s\n", g_cd_path);
+        }
+    }
+
     // Start execution at the CPU reset vector (BIOS entry point).
     cpu_reset(0xBFC00000);
+
+    // Loader boot progress, driven by service_loader_boot each step: the menu is
+    // sideloaded at kernel-up and a menu selection loads or boots here.
+    int kernel_up = 0;
+    int sideloaded = 0;
 
     // Timing tracking variables using SDL3's high-resolution performance counters
     uint64_t last_time = SDL_GetPerformanceCounter();
@@ -285,6 +381,7 @@ jonboy_runapp(int argc, char *argv[])
                     break;
                 }
 
+                service_loader_boot(&kernel_up, &sideloaded);
                 step_cpu(); // interrupts are recognized inside step_cpu
             }
 
@@ -583,76 +680,9 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
     int kernel_up = 0; // set once the BIOS reaches the shell entry point
 
     while (!cpu.halted && steps < max_steps) {
-        if (cpu.PC == 0x80030000) {
-            kernel_up = 1;
-        }
-
-        if (g_sideload_exe && !sideloaded && cpu.PC == 0x80030000) {
-            uint32_t pc, gp, sp;
-
-            if (mem_load_exe(g_sideload_exe, &pc, &gp, &sp) != 0) {
-                fprintf(stderr, "sideload: failed to load %s\n", g_sideload_exe);
-                return 1;
-            }
-
-            cpu.PC = pc;
-            cpu.next_pc = pc + 4;
-            cpu.regs[28] = gp;
-            cpu.regs[29] = sp;
-            cpu.regs[30] = sp;
-            sideloaded = 1;
-            printf("Sideloaded %s at PC=0x%08X (kernel up, step %llu)\n",
-                   g_sideload_exe, pc, (unsigned long long)steps);
-            continue;
-        }
-
+        service_loader_boot(&kernel_up, &sideloaded);
         step_cpu();
         steps++;
-
-        // The guest menu picked an image and strobed the boot command. Wait
-        // until the kernel is up, then boot it.
-        if (loader_boot_pending() && kernel_up) {
-            const char *path = loader_boot_path();
-
-            if (loader_boot_is_cd()) {
-                // A CD image boots the way a real disc does: mount it, then
-                // reset the machine so the BIOS runs its disc boot sequence.
-                // Stop re-sideloading the menu, and clear RAM and hardware so
-                // the reboot starts clean.
-                if (path && cdrom_mount(path) == 0) {
-                    printf("Loader mounting disc %s, rebooting (step %llu)\n",
-                           path, (unsigned long long)steps);
-                    g_sideload_exe = NULL;
-                    sideloaded = 0;
-                    kernel_up = 0;
-                    memset(system_ram, 0, RAM_SIZE);
-                    psx_hardware_reset();
-                    cpu_reset(0xBFC00000);
-                } else {
-                    fprintf(stderr, "loader: failed to mount %s\n",
-                            path ? path : "(none)");
-                }
-            } else {
-                // A PS-EXE loads over RAM and jumps to its entry, the same way
-                // sideloading does.
-                uint32_t pc, gp, sp;
-
-                if (path && mem_load_exe(path, &pc, &gp, &sp) == 0) {
-                    cpu.PC = pc;
-                    cpu.next_pc = pc + 4;
-                    cpu.regs[28] = gp;
-                    cpu.regs[29] = sp;
-                    cpu.regs[30] = sp;
-                    printf("Loader booted %s at PC=0x%08X (step %llu)\n",
-                           path, pc, (unsigned long long)steps);
-                } else {
-                    fprintf(stderr, "loader: failed to boot %s\n",
-                            path ? path : "(none)");
-                }
-            }
-
-            loader_clear_boot();
-        }
     }
 
     printf("Ran %llu steps.\n", (unsigned long long)steps);
@@ -681,7 +711,8 @@ print_usage(const char *prog)
             "  --psio              inject the PSIO boot stub over the BIOS entry\n"
             "  --sd <file>         mount a virtual SD-card image\n"
             "  --firmware <file>   load a PSIO firmware ROM image\n"
-            "  --games <dir>       directory the loader menu browses for images\n"
+            "  --games <dir>       directory the loader menu browses (auto-loads\n"
+            "                      the menu in the windowed build; pick with the pad)\n"
             "  --cd <file>         mount a disc image (.bin or .cue)\n"
             "  --memcard <file>    memory card image (raw 128 KB; created if absent)\n"
             "Headless options:\n"
@@ -743,6 +774,13 @@ main(int argc, char *argv[])
             print_usage(argv[0]);
             return 0;
         }
+    }
+
+    // Auto-sideload the loader menu when a games directory is set but no explicit
+    // program was given. This is what makes the menu usable in the windowed build
+    // (where the keyboard drives the pad); it also applies to a --boot run.
+    if (g_games_dir && !g_sideload_exe) {
+        g_sideload_exe = LOADER_DEFAULT_PATH;
     }
 
     if (boot_mode) {

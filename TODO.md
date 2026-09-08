@@ -180,9 +180,12 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
 - [x] on-screen menu: loader/main.c (C via mipsel-gcc, make builds _out/loader.exe)
   brings up the GPU, enumerates images over the backdoor, draws the list with an
   embedded 8x8 font, moves a cursor with the D-pad, and boots on X. Verified end
-  to end (D-pad + Cross selects and boots the highlighted game). Run it with
-  --boot --sideload _out/loader.exe --games <dir>.
-  - [ ] auto-sideload the loader when --games is set (no explicit --sideload)
+  to end (D-pad + Cross selects and boots the highlighted game). Run the windowed
+  build with --games <dir> (the menu auto-loads and the keyboard drives the pad),
+  or headless with --boot --sideload _out/loader.exe --games <dir>.
+  - [x] auto-sideload the loader when --games is set (no explicit --sideload).
+    main.c defaults --sideload to _out/loader.exe, so the windowed build boots
+    straight into the menu.
   - [ ] scroll when there are more entries than fit on screen
 - [~] CD image support: loader_scan now indexes .cue/.bin/.iso alongside PS-EXE
   files and records each entry's type (LDR_TYPE_EXE / LDR_TYPE_CD). When the menu
@@ -190,12 +193,10 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
   the hardware, and reboots the machine so the retail BIOS runs its normal disc
   boot sequence (the stock CD-ROM registers already serve sectors from cdrom.c).
   Unit tested (test_loader.c, `make loader-test`: indexing, EXE-vs-CD
-  classification, path/name, and the boot strobe). Remaining: the loader flow
-  (sideload plus the boot-pending handling) currently lives only in the headless
-  run_boot loop, which takes no pad input, so selecting a CD from the menu is not
-  yet reachable interactively. Wiring the loader into the windowed run loop
-  (jonboy_runapp), which has keyboard input, is the next step and would make both
-  the EXE and CD menu boots usable by a person.
+  classification, path/name, and the boot strobe). The loader boot flow is shared
+  between the headless run_boot loop and the windowed jonboy_runapp loop through
+  service_loader_boot, so the menu (which the keyboard drives in the windowed
+  build) can now select and boot a CD image interactively.
 - [ ] stream file bytes over the backdoor so the guest can read image data
   directly (needed once the menu wants thumbnails, metadata, or CD sectors)
 
