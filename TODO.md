@@ -274,8 +274,13 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
   pushed from the emu thread straight to the SDL stream, whose own callback thread
   drains it, so it keeps playing through a main-thread stall. Shutdown sets an
   atomic stop flag, joins the emu thread, then stops the CD worker.
-  - [ ] optional: triple-buffer the frame snapshot so neither thread ever waits
-    on the other's 1 MB copy (currently a brief lock hold on each side).
+  - [x] triple-buffer the frame snapshot (main.c) so neither thread waits on the
+    other. Three VRAM snapshot buffers with a lock-free single-producer/
+    single-consumer handoff: frame_slot (an SDL_AtomicInt) holds the last
+    published buffer index plus a FRAME_FRESH bit, and each side atomically
+    exchanges its private index with that slot (SDL_SetAtomicInt), so the two
+    threads never touch the same buffer and neither copies under a lock. The
+    display geometry travels with each buffer in g_frame_meta.
   - [ ] optional: let the SDL audio callback pull the SPU ring directly instead
     of the emu thread pushing, for tighter audio latency.
 

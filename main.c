@@ -224,19 +224,27 @@ typedef struct {
     SDL_Thread *emu;
     SDL_AtomicInt running;     // 0 stops the emu thread (set by the main thread)
 
-    // Frame handoff: the emu thread publishes a linear snapshot of VRAM here at
-    // the end of each emulated frame; the main thread uploads it and presents.
-    SDL_Mutex *frame_lock;
-    int frame_dx, frame_dy, frame_dw, frame_dh; // display area within the snapshot
-    int frame_blank;                            // display disabled this frame
-    int frame_ready;                            // a snapshot has been published
+    // Frame handoff: a lock-free triple buffer. The emu thread transposes VRAM
+    // into its private buffer and publishes it; the main thread takes the latest
+    // published buffer to present. Neither thread ever waits on the other, and
+    // neither copies under a lock. frame_slot holds the index of the last
+    // published buffer plus FRAME_FRESH when it has not been presented yet;
+    // produce_idx/consume_idx are each private to one thread.
+    SDL_AtomicInt frame_slot;
+    int produce_idx;   // emu-thread private: the buffer it writes into
+    int consume_idx;   // main-thread private: the buffer it presents from
+    int have_frame;    // main-thread: a frame has been received at least once
 } AppContext;
 
-// Linear row-major BGR555 snapshots of VRAM. g_frame_pixels is the shared front
-// buffer (guarded by frame_lock); g_frame_back is the emu thread's private buffer
-// it transposes into before publishing, so the lock is held only for one memcpy.
-static uint16_t g_frame_pixels[VRAM_HEIGHT * VRAM_WIDTH];
-static uint16_t g_frame_back[VRAM_HEIGHT * VRAM_WIDTH];
+// Three linear row-major BGR555 snapshots of VRAM, one per triple-buffer slot,
+// with the display geometry that goes with each.
+#define FRAME_BUFS 3
+#define FRAME_IDX_MASK 0x3
+#define FRAME_FRESH 0x4
+static uint16_t g_frame_buf[FRAME_BUFS][VRAM_HEIGHT * VRAM_WIDTH];
+static struct {
+    int dx, dy, dw, dh, blank;
+} g_frame_meta[FRAME_BUFS];
 
 // SPU output is 44.1 kHz stereo 16-bit. Drain the SPU ring after each emulated
 // frame and hand it to the audio device, keeping at most a short backlog so the
@@ -266,67 +274,75 @@ pump_audio(AppContext *app)
     }
 }
 
-// Emu thread: transpose the column-major VRAM into a linear snapshot and publish
-// it for the main thread to present. The transpose runs off the lock in a private
-// buffer, so frame_lock is held only long enough to copy the finished snapshot.
+// Emu thread: transpose the column-major VRAM into its private snapshot buffer
+// and publish it. The exchange hands the just-written buffer to the main thread
+// (as the fresh slot) and takes back whichever buffer the slot held, all without
+// a lock and without waiting on the main thread.
 static void
 publish_frame(AppContext *app)
 {
+    uint16_t *dst = g_frame_buf[app->produce_idx];
     for (int y = 0; y < VRAM_HEIGHT; y++) {
-        uint16_t *row = &g_frame_back[(size_t)y * VRAM_WIDTH];
+        uint16_t *row = &dst[(size_t)y * VRAM_WIDTH];
         for (int x = 0; x < VRAM_WIDTH; x++) {
             row[x] = vram.canvas[x][y];
         }
     }
 
-    SDL_LockMutex(app->frame_lock);
-    memcpy(g_frame_pixels, g_frame_back, sizeof g_frame_pixels);
-    app->frame_dx = gpu.disp_x;
-    app->frame_dy = gpu.disp_y;
-    app->frame_dw = gpu.disp_w;
-    app->frame_dh = gpu.disp_h;
-    app->frame_blank = gpu.disp_blank;
-    app->frame_ready = 1;
-    SDL_UnlockMutex(app->frame_lock);
+    g_frame_meta[app->produce_idx].dx = gpu.disp_x;
+    g_frame_meta[app->produce_idx].dy = gpu.disp_y;
+    g_frame_meta[app->produce_idx].dw = gpu.disp_w;
+    g_frame_meta[app->produce_idx].dh = gpu.disp_h;
+    g_frame_meta[app->produce_idx].blank = gpu.disp_blank;
+
+    // SDL_SetAtomicInt is an atomic exchange with a full memory barrier, so the
+    // buffer writes above are visible to the main thread once it reads the fresh
+    // slot. It returns the previous slot value; that buffer is now ours to reuse.
+    int old = SDL_SetAtomicInt(&app->frame_slot, app->produce_idx | FRAME_FRESH);
+    app->produce_idx = old & FRAME_IDX_MASK;
 }
 
-// Main thread: upload the latest published snapshot to the texture and present.
+// Main thread: take the latest published buffer (if any) and present it. When no
+// new frame has been published since last time, it re-presents the buffer it
+// already owns, so the display keeps showing the last frame.
 static void
 present_frame(AppContext *app)
 {
-    void *pixels;
-    int pitch;
-    int dx, dy, dw, dh, blank, ready;
-
-    SDL_LockMutex(app->frame_lock);
-    ready = app->frame_ready;
-    dx = app->frame_dx;
-    dy = app->frame_dy;
-    dw = app->frame_dw;
-    dh = app->frame_dh;
-    blank = app->frame_blank;
-    if (ready && SDL_LockTexture(app->vram_texture, NULL, &pixels, &pitch)) {
-        uint8_t *dst = pixels;
-        for (int y = 0; y < VRAM_HEIGHT; y++) {
-            memcpy(dst + (size_t)y * pitch,
-                   &g_frame_pixels[(size_t)y * VRAM_WIDTH],
-                   VRAM_WIDTH * sizeof(uint16_t));
-        }
-        SDL_UnlockTexture(app->vram_texture);
+    if (SDL_GetAtomicInt(&app->frame_slot) & FRAME_FRESH) {
+        int old = SDL_SetAtomicInt(&app->frame_slot, app->consume_idx);
+        app->consume_idx = old & FRAME_IDX_MASK;
+        app->have_frame = 1;
     }
-    SDL_UnlockMutex(app->frame_lock);
 
     SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 255);
     SDL_RenderClear(app->renderer);
 
-    if (ready) {
+    if (app->have_frame) {
+        void *pixels;
+        int pitch;
+        if (SDL_LockTexture(app->vram_texture, NULL, &pixels, &pitch)) {
+            uint8_t *dst = pixels;
+            const uint16_t *src = g_frame_buf[app->consume_idx];
+            for (int y = 0; y < VRAM_HEIGHT; y++) {
+                memcpy(dst + (size_t)y * pitch,
+                       &src[(size_t)y * VRAM_WIDTH],
+                       VRAM_WIDTH * sizeof(uint16_t));
+            }
+            SDL_UnlockTexture(app->vram_texture);
+        }
+
         if (app->full_vram_view) {
             // Debug view: the entire 1024x512 VRAM stretched to the window.
             SDL_RenderTexture(app->renderer, app->vram_texture, NULL, NULL);
-        } else if (!blank) {
+        } else if (!g_frame_meta[app->consume_idx].blank) {
             // Normal view: only the GPU's display area, as a TV would. A disabled
             // display leaves the window cleared (black).
-            SDL_FRect src = { (float)dx, (float)dy, (float)dw, (float)dh };
+            SDL_FRect src = {
+                (float)g_frame_meta[app->consume_idx].dx,
+                (float)g_frame_meta[app->consume_idx].dy,
+                (float)g_frame_meta[app->consume_idx].dw,
+                (float)g_frame_meta[app->consume_idx].dh
+            };
             SDL_RenderTexture(app->renderer, app->vram_texture, &src, NULL);
         }
     }
@@ -408,7 +424,13 @@ jonboy_runapp(int argc, char *argv[])
     // The emulation thread keeps its own real-time pacing independently.
     SDL_SetRenderVSync(app.renderer, 1);
 
-    app.frame_lock = SDL_CreateMutex();
+    // Triple-buffer handoff: the three buffers start partitioned as producer(0),
+    // shared(2), consumer(1). Every publish/consume swaps a private index with
+    // the shared slot, so this partition is preserved and the two threads never
+    // touch the same buffer.
+    app.produce_idx = 0;
+    app.consume_idx = 1;
+    SDL_SetAtomicInt(&app.frame_slot, 2);
 
     // CREATE THE VRAM UPLOAD TEXTURE:
     // PSX VRAM pixels are 5-5-5: bit15 = mask/STP, bits14-10 = blue,
@@ -567,9 +589,6 @@ jonboy_runapp(int argc, char *argv[])
         SDL_WaitThread(app.emu, NULL);
     }
     cdrom_io_stop();
-    if (app.frame_lock) {
-        SDL_DestroyMutex(app.frame_lock);
-    }
     if (app.gamepad) {
         SDL_CloseGamepad(app.gamepad);
     }
