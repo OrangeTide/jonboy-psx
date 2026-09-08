@@ -11,6 +11,18 @@ its sticks drive the analog axes, its buttons/dpad/triggers combine with the
 keyboard (active-low AND), and hotplug is handled. Slot 2 reports no device; the
 memory card (0x81) answers via mc.c when mounted.
 
+A timed system-event script can also drive the machine (script.c, --script
+<file>), clocked by the VBLANK frame counter in sched.c. Each line is
+"<frame> <command> ...": `pad <tokens>` sets the buttons and stick axes held from
+that frame on; `analog on|off` sets DualShock analog mode; `disc <path>` inserts
+or changes the disc and `disc eject` removes it. Pad keyframes are held; the other
+events fire once, and the script replays if the frame counter restarts. It runs in
+every mode, so it also gives headless runs a way to work the controller and swap
+discs (for demos, captures, and driving the menu). Not tied to pad input, so more
+event types drop in easily. Unit tested (test_script.c, `make script-test`).
+Nuance: inserting a disc mid-run swaps the image but does not yet raise the
+lid-open/close interrupt, so a game only sees it on its next read.
+
 - [~] support the 4 main controller port types:
   - [x] Standard Digital Pad ID: 0x41
   - [ ] Standard Analog Flightstick ID: 0x53

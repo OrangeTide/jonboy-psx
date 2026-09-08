@@ -18,6 +18,7 @@
 #include "spu.h"
 #include "mc.h"
 #include "sched.h"
+#include "script.h"
 
 // Map a host key to a digital pad button bit, or 0 if it is not a pad key.
 static uint16_t
@@ -119,6 +120,7 @@ static const char *g_sideload_exe = NULL;    // PS-EXE to run atop the booted ke
 static const char *g_games_dir = NULL;       // directory the loader menu browses
 static const char *g_cd_path = NULL;         // disc image to mount (.bin/.cue)
 static const char *g_memcard_path = NULL;    // memory-card image (raw 128 KB)
+static const char *g_script_path = NULL;     // timed system-event script file
 
 #define TARGET_FPS 60
 
@@ -450,8 +452,11 @@ jonboy_runapp(int argc, char *argv[])
             }
         }
 
-        // Fold this frame's keyboard and gamepad state into the pad.
-        update_pad_input(app.gamepad, kbd_buttons);
+        // Fold this frame's keyboard and gamepad state into the pad, unless a
+        // script is driving the controller (it sets the pad state at VBLANK).
+        if (!script_active()) {
+            update_pad_input(app.gamepad, kbd_buttons);
+        }
 
         // High-precision clock timing step delta calculation
         uint64_t current_time = SDL_GetPerformanceCounter();
@@ -817,6 +822,7 @@ print_usage(const char *prog)
             "                      the menu in the windowed build; pick with the pad)\n"
             "  --cd <file>         mount a disc image (.bin or .cue)\n"
             "  --memcard <file>    memory card image (raw 128 KB; created if absent)\n"
+            "  --script <file>     run a timed system-event script (pad, disc)\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
             "  --pc <hex>          entry PC (default = load address)\n"
@@ -860,6 +866,8 @@ main(int argc, char *argv[])
             g_cd_path = argv[++i];
         } else if (strcmp(argv[i], "--memcard") == 0 && i + 1 < argc) {
             g_memcard_path = argv[++i];
+        } else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
+            g_script_path = argv[++i];
         } else if (strcmp(argv[i], "--bios") == 0 && i + 1 < argc) {
             g_bios_path = argv[++i];
         } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
@@ -883,6 +891,10 @@ main(int argc, char *argv[])
     // (where the keyboard drives the pad); it also applies to a --boot run.
     if (g_games_dir && !g_sideload_exe) {
         g_sideload_exe = LOADER_DEFAULT_PATH;
+    }
+
+    if (g_script_path && script_load(g_script_path) == 0) {
+        printf("Running script %s\n", g_script_path);
     }
 
     if (boot_mode) {

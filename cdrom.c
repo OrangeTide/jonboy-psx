@@ -212,6 +212,14 @@ disc_eject(void)
     memset(&disc, 0, sizeof disc);
 }
 
+// Eject the mounted disc: close the image and clear the disc state. The drive
+// controller keeps running and reports no disc until a new image is mounted.
+void
+cdrom_eject(void)
+{
+    disc_eject();
+}
+
 // Mount a raw single-file image (.bin/.iso) as one data track at LBA 0.
 static int
 mount_raw(const char *path)

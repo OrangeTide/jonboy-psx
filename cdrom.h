@@ -19,6 +19,7 @@ void psx_cdrom_tick(uint32_t cycles);
 // referenced .bin is opened). Returns 0 on success.
 int cdrom_mount(const char *path);
 int cdrom_has_disc(void);
+void cdrom_eject(void);
 
 // Pull `words` 32-bit words of the current sector into RAM for DMA channel 3.
 void cdrom_dma_read(uint32_t madr, uint32_t words);
