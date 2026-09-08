@@ -311,42 +311,81 @@ draw_triangle(RVertex v0, RVertex v1, RVertex v2,
     int a20_step = a20 << 4, b20_step = b20 << 4;
     int a01_step = a01 << 4, b01_step = b01 << 4;
 
-    for (int py = miny; py <= maxy; py++) {
+    // Every interpolated attribute A is affine across the triangle, so instead
+    // of three float products per pixel (A0*b0 + A1*b1 + A2*b2) it is stepped by
+    // a constant per pixel. A = A2 + (A0-A2)*b0 + (A1-A2)*b1, so dA/dx and dA/dy
+    // fall straight out of the barycentric steps. Only the attributes the
+    // primitive actually uses are carried.
+    //
+    // The nest walks column by column, py innermost. VRAM is column-major
+    // (canvas[x][y]), so a step in py is the contiguous direction; stepping px
+    // in the inner loop would stride a whole column (1 KB) per pixel and miss
+    // the cache on nearly every write.
+    int interp_rgb = gouraud;
+    int interp_uv = ps->textured;
+
+    float b0_dx = a12_step * inv_area, b0_dy = b12_step * inv_area;
+    float b1_dx = a20_step * inv_area, b1_dy = b20_step * inv_area;
+    float b0_col = w0_row * inv_area;
+    float b1_col = w1_row * inv_area;
+
+    float r_dy = 0, g_dy = 0, b_dy = 0;
+    float u_dy = 0, v_dy = 0;
+    float r_col = 0, g_col = 0, b_col = 0, u_col = 0, v_col = 0;
+
+    if (interp_rgb) {
+        r_dy = (v0.r - v2.r) * b0_dy + (v1.r - v2.r) * b1_dy;
+        g_dy = (v0.g - v2.g) * b0_dy + (v1.g - v2.g) * b1_dy;
+        b_dy = (v0.b - v2.b) * b0_dy + (v1.b - v2.b) * b1_dy;
+    }
+    if (interp_uv) {
+        u_dy = (v0.u - v2.u) * b0_dy + (v1.u - v2.u) * b1_dy;
+        v_dy = (v0.v - v2.v) * b0_dy + (v1.v - v2.v) * b1_dy;
+    }
+
+    for (int px = minx; px <= maxx; px++) {
         int w0 = w0_row;
         int w1 = w1_row;
         int w2 = w2_row;
 
-        for (int px = minx; px <= maxx; px++) {
-            if ((w0 + bias0) >= 0 && (w1 + bias1) >= 0 && (w2 + bias2) >= 0) {
-                float bary0 = w0 * inv_area;
-                float bary1 = w1 * inv_area;
-                float bary2 = 1.0f - bary0 - bary1;
+        if (interp_rgb) {
+            r_col = v2.r + (v0.r - v2.r) * b0_col + (v1.r - v2.r) * b1_col;
+            g_col = v2.g + (v0.g - v2.g) * b0_col + (v1.g - v2.g) * b1_col;
+            b_col = v2.b + (v0.b - v2.b) * b0_col + (v1.b - v2.b) * b1_col;
+        }
+        if (interp_uv) {
+            u_col = v2.u + (v0.u - v2.u) * b0_col + (v1.u - v2.u) * b1_col;
+            v_col = v2.v + (v0.v - v2.v) * b0_col + (v1.v - v2.v) * b1_col;
+        }
 
-                int r, g, b;
+        float r = r_col, g = g_col, b = b_col, u = u_col, vv = v_col;
+
+        for (int py = miny; py <= maxy; py++) {
+            if ((w0 + bias0) >= 0 && (w1 + bias1) >= 0 && (w2 + bias2) >= 0) {
+                int cr, cg, cb;
 
                 if (gouraud) {
-                    r = (int)(v0.r * bary0 + v1.r * bary1 + v2.r * bary2 + 0.5f);
-                    g = (int)(v0.g * bary0 + v1.g * bary1 + v2.g * bary2 + 0.5f);
-                    b = (int)(v0.b * bary0 + v1.b * bary1 + v2.b * bary2 + 0.5f);
+                    cr = (int)(r + 0.5f);
+                    cg = (int)(g + 0.5f);
+                    cb = (int)(b + 0.5f);
                 } else {
-                    r = v0.r;
-                    g = v0.g;
-                    b = v0.b;
+                    cr = v0.r;
+                    cg = v0.g;
+                    cb = v0.b;
                 }
 
                 if (ps->textured) {
-                    int u = (int)(v0.u * bary0 + v1.u * bary1 + v2.u * bary2 + 0.5f);
-                    int vv = (int)(v0.v * bary0 + v1.v * bary1 + v2.v * bary2 + 0.5f);
-                    int texel = sample_texel(&ps->tex, u, vv);
+                    int texel = sample_texel(&ps->tex, (int)(u + 0.5f),
+                                             (int)(vv + 0.5f));
 
                     if (texel >= 0) {
                         int tr, tg, tb;
                         unpack_555((uint16_t)texel, &tr, &tg, &tb);
 
                         if (!ps->raw) {
-                            tr = modulate(tr, r);
-                            tg = modulate(tg, g);
-                            tb = modulate(tb, b);
+                            tr = modulate(tr, cr);
+                            tg = modulate(tg, cg);
+                            tb = modulate(tb, cb);
                         }
 
                         // Blend only texels whose STP bit is set.
@@ -355,19 +394,30 @@ draw_triangle(RVertex v0, RVertex v1, RVertex v2,
                                   ps->semi_mode);
                     }
                 } else {
-                    put_pixel(px, py, rgb_to_555(r, g, b), ps->semi,
+                    put_pixel(px, py, rgb_to_555(cr, cg, cb), ps->semi,
                               ps->semi_mode);
                 }
             }
 
-            w0 += a12_step;
-            w1 += a20_step;
-            w2 += a01_step;
+            w0 += b12_step;
+            w1 += b20_step;
+            w2 += b01_step;
+            if (interp_rgb) {
+                r += r_dy;
+                g += g_dy;
+                b += b_dy;
+            }
+            if (interp_uv) {
+                u += u_dy;
+                vv += v_dy;
+            }
         }
 
-        w0_row += b12_step;
-        w1_row += b20_step;
-        w2_row += b01_step;
+        w0_row += a12_step;
+        w1_row += a20_step;
+        w2_row += a01_step;
+        b0_col += b0_dx;
+        b1_col += b1_dx;
     }
 }
 
@@ -393,8 +443,10 @@ draw_rectangle(int x, int y, int w, int h, int r, int g, int b,
 
     uint16_t solid = rgb_to_555(r, g, b);
 
-    for (int py = y; py <= y1; py++) {
-        for (int px = x; px <= x1; px++) {
+    // Iterate py innermost: VRAM is column-major (canvas[x][y]), so this walks
+    // contiguous memory instead of striding a full column per pixel.
+    for (int px = x; px <= x1; px++) {
+        for (int py = y; py <= y1; py++) {
             if (ps->textured) {
                 int texel = sample_texel(&ps->tex, u0 + (px - ox),
                                          v0 + (py - oy));
