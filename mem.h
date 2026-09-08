@@ -18,35 +18,47 @@
 extern uint8_t system_ram[MEM_MAX_SIZE];
 extern uint8_t bios_rom[BIOS_SIZE];
 
-// 1. Fetch a 32-bit Word (Little-Endian)
-// Combines 4 bytes: address A is the lowest byte, A+3 is the highest byte.
-#define MEM_READ_32(addr) ( \
-    ((uint32_t)(system_ram[(addr) + 0]))       | \
-    ((uint32_t)(system_ram[(addr) + 1] << 8))  | \
-    ((uint32_t)(system_ram[(addr) + 2] << 16)) | \
-    ((uint32_t)(system_ram[(addr) + 3] << 24))   \
-)
+// Raw little-endian RAM accessors. These are functions, not macros, so their
+// arguments are evaluated exactly once. That matters because callers pass
+// side-effecting expressions as the value, for example
+// MEM_WRITE_32(addr, mdec_dma_out()), where a macro that expanded the value
+// four times would advance the source FIFO four times and drop three words.
 
-// 2. Fetch a 16-bit Halfword (Little-Endian)
-#define MEM_READ_16(addr) ( \
-    ((uint16_t)(system_ram[(addr) + 0]))       | \
-    ((uint16_t)(system_ram[(addr) + 1] << 8))    \
-)
+// 1. Fetch a 32-bit Word (Little-Endian): byte at addr is the lowest.
+static inline uint32_t
+MEM_READ_32(uint32_t addr)
+{
+    return (uint32_t)system_ram[addr + 0]
+           | ((uint32_t)system_ram[addr + 1] << 8)
+           | ((uint32_t)system_ram[addr + 2] << 16)
+           | ((uint32_t)system_ram[addr + 3] << 24);
+}
 
-// 3. Write a 32-bit Word (Little-Endian)
-// Splits a 32-bit value into 4 individual bytes across sequential memory addresses.
-#define MEM_WRITE_32(addr, val) do { \
-    system_ram[(addr) + 0] = (uint8_t)((val) & 0xFF);         \
-    system_ram[(addr) + 1] = (uint8_t)(((val) >> 8) & 0xFF);  \
-    system_ram[(addr) + 2] = (uint8_t)(((val) >> 16) & 0xFF); \
-    system_ram[(addr) + 3] = (uint8_t)(((val) >> 24) & 0xFF); \
-} while(0)
+// 2. Fetch a 16-bit Halfword (Little-Endian).
+static inline uint16_t
+MEM_READ_16(uint32_t addr)
+{
+    return (uint16_t)(system_ram[addr + 0]
+                      | (system_ram[addr + 1] << 8));
+}
 
-// 4. Write a 16-bit Halfword (Little-Endian)
-#define MEM_WRITE_16(addr, val) do { \
-    system_ram[(addr) + 0] = (uint8_t)((val) & 0xFF);         \
-    system_ram[(addr) + 1] = (uint8_t)(((val) >> 8) & 0xFF);  \
-} while(0)
+// 3. Write a 32-bit Word (Little-Endian): split into four sequential bytes.
+static inline void
+MEM_WRITE_32(uint32_t addr, uint32_t val)
+{
+    system_ram[addr + 0] = (uint8_t)(val & 0xFF);
+    system_ram[addr + 1] = (uint8_t)((val >> 8) & 0xFF);
+    system_ram[addr + 2] = (uint8_t)((val >> 16) & 0xFF);
+    system_ram[addr + 3] = (uint8_t)((val >> 24) & 0xFF);
+}
+
+// 4. Write a 16-bit Halfword (Little-Endian).
+static inline void
+MEM_WRITE_16(uint32_t addr, uint16_t val)
+{
+    system_ram[addr + 0] = (uint8_t)(val & 0xFF);
+    system_ram[addr + 1] = (uint8_t)((val >> 8) & 0xFF);
+}
 
 // Address-translating, MMIO-aware accessors. The CPU must go through these,
 // never the raw macros above, so that virtual addresses are converted to
