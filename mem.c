@@ -69,34 +69,33 @@ mem_read(uint32_t v_addr, int size)
     }
 
     // Everything below is a timing device (SPU, CD-ROM, pad, or the MMIO block).
-    // Bring the hardware clock current so the register reads the right time.
+    // Bring the hardware clock current so the register reads the right time, then
+    // reschedule afterward since a read can have side effects (a FIFO pop) that
+    // move the next event.
     psx_hardware_sync();
 
+    uint32_t val = 0;
+
     if (a >= SPU_BASE && a < SPU_BASE + SPU_SIZE) {
-        return psx_spu_read(a, size);
-    }
-
-    if (a >= CDROM_BASE && a < CDROM_BASE + CDROM_SIZE) {
-        return psx_cdrom_read(a, size);
-    }
-
-    if (a >= PAD_BASE && a < PAD_BASE + PAD_SIZE) {
-        return psx_pad_read(a, size);
-    }
-
-    if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
+        val = psx_spu_read(a, size);
+    } else if (a >= CDROM_BASE && a < CDROM_BASE + CDROM_SIZE) {
+        val = psx_cdrom_read(a, size);
+    } else if (a >= PAD_BASE && a < PAD_BASE + PAD_SIZE) {
+        val = psx_pad_read(a, size);
+    } else if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
         uint32_t word = read_hardware_word(a & ~3u);
 
         if (size == 4) {
-            return word;
+            val = word;
+        } else {
+            uint32_t shift = (a & 3) * 8;
+            uint32_t mask = (size == 1) ? 0xFF : 0xFFFF;
+            val = (word >> shift) & mask;
         }
-
-        uint32_t shift = (a & 3) * 8;
-        uint32_t mask = (size == 1) ? 0xFF : 0xFFFF;
-        return (word >> shift) & mask;
     }
 
-    return 0;
+    psx_hardware_resched();
+    return val;
 }
 
 // Decode a physical address to its region and write a sized value. Sub-word
@@ -128,31 +127,22 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
     }
 
     // Everything below is a timing device (SPU, CD-ROM, pad, or the MMIO block).
-    // Sync first so the device sees the right time; psx_hardware_sync then folds
-    // any event this write arms into the scheduler's next deadline.
+    // Sync first so the device sees the right time, then reschedule afterward so
+    // an event this write arms, cancels, or moves is folded into the deadline.
     psx_hardware_sync();
 
     if (a >= SPU_BASE && a < SPU_BASE + SPU_SIZE) {
         psx_spu_write(a, value, size);
-        return;
-    }
-
-    if (a >= CDROM_BASE && a < CDROM_BASE + CDROM_SIZE) {
+    } else if (a >= CDROM_BASE && a < CDROM_BASE + CDROM_SIZE) {
         psx_cdrom_write(a, value, size);
-        return;
-    }
-
-    if (a >= PAD_BASE && a < PAD_BASE + PAD_SIZE) {
+    } else if (a >= PAD_BASE && a < PAD_BASE + PAD_SIZE) {
         psx_pad_write(a, value, size);
-        return;
-    }
-
-    if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
+    } else if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
         write_hardware_word(a & ~3u, value);
-        return;
     }
+    // BIOS is read-only; anything else is unmapped and ignored.
 
-    // BIOS is read-only; anything else is unmapped. Ignore.
+    psx_hardware_resched();
 }
 
 // Debugger watchpoint hook. NULL unless the gdb server has active watchpoints.

@@ -117,12 +117,22 @@ psx_hardware_advance(uint32_t cycles)
 void
 psx_hardware_sync(void)
 {
-    // Make the devices current for a register access. Force the next step to
-    // flush again so that a write which arms a new event (a DMA completion, a
-    // pad acknowledge, a fresh timer target) is folded into the deadline before
-    // any more cycles pass.
-    hw_flush();
-    hw_deadline = hw_cycle;
+    // Apply the cycles elapsed so far so the device about to be accessed sees
+    // the right time. The deadline is left alone here: the access may change it,
+    // so psx_hardware_resched recomputes it once afterward. No advance runs
+    // between the two, so the stale deadline is never consulted in between.
+    uint32_t delta = (uint32_t)(hw_cycle - hw_synced);
+
+    if (delta) {
+        hw_apply(delta);
+        hw_synced = hw_cycle;
+    }
+}
+
+void
+psx_hardware_resched(void)
+{
+    hw_deadline = hw_cycle + hw_next_event();
 }
 
 void
