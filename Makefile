@@ -34,7 +34,7 @@ conformance : $(BINDIR)/jonboy
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test xa-test mc-test loader-test
+.PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test
 ## jonboy
 EMU_SRC=cdrom.c cpu.c dma.c gpu.c inject.c main.c mc.c mem.c pad.c psio.c rom.c sched.c spu.c timer.c vram.c xa.c
 all :: $(BINDIR)/jonboy
@@ -58,9 +58,9 @@ $(BINDIR)/jonboy.c : $(EMU_SRC) $(wildcard *.h) tools/amalgamate.awk | $(BINDIR)
 $(BINDIR)/jonboy-amalg : $(BINDIR)/jonboy.c | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) $(shell pkg-config --cflags sdl3) $< $(shell pkg-config --libs sdl3)
 ## host unit tests (built without SDL: cdrom.c/spu.c with stub globals)
-all :: $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader
+all :: $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader $(BINDIR)/test_pad
 clean ::
-	$(RM) $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader
+	$(RM) $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader $(BINDIR)/test_pad
 $(BINDIR)/test_cdda : test_cdda.c cdrom.c xa.c cdrom.h cpu.h mem.h spu.h xa.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_cdda.c cdrom.c xa.c
 $(BINDIR)/test_spu : test_spu.c spu.c spu.h cpu.h lebytes.h | $(BINDIR)
@@ -71,6 +71,8 @@ $(BINDIR)/test_mc : test_mc.c mc.c mc.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_mc.c mc.c
 $(BINDIR)/test_loader : test_loader.c psio.c psio.h lebytes.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_loader.c psio.c
+$(BINDIR)/test_pad : test_pad.c pad.c mc.c pad.h cpu.h mc.h | $(BINDIR)
+	$(CC) -o $@ $(CFLAGS) test_pad.c pad.c mc.c
 cdda-test : $(BINDIR)/test_cdda
 	./$(BINDIR)/test_cdda
 spu-test : $(BINDIR)/test_spu
@@ -81,6 +83,8 @@ mc-test : $(BINDIR)/test_mc
 	./$(BINDIR)/test_mc
 loader-test : $(BINDIR)/test_loader
 	./$(BINDIR)/test_loader
+pad-test : $(BINDIR)/test_pad
+	./$(BINDIR)/test_pad
 ## testcarts
 TESTS=test1 test2 test3 test4 test5 test6 test7 test8 test9
 TEST_CARTS=$(TESTS:%=$(BINDIR)/%.cart)

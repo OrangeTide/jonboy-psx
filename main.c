@@ -36,8 +36,77 @@ pad_bit_for_key(SDL_Keycode key)
     case SDLK_RSHIFT:    return PAD_BTN_SELECT;
     case SDLK_Q:         return PAD_BTN_L1;
     case SDLK_W:         return PAD_BTN_R1;
+    case SDLK_E:         return PAD_BTN_L2;
+    case SDLK_R:         return PAD_BTN_R2;
+    case SDLK_C:         return PAD_BTN_L3;
+    case SDLK_V:         return PAD_BTN_R3;
     default:             return 0;
     }
+}
+
+// Map an SDL analog axis (-32768..32767) to the pad's 0..255 range, 0x80 center.
+// The sign conventions line up: SDL right/down are positive, which the pad also
+// reports as the high end.
+static uint8_t
+axis_to_byte(int16_t v)
+{
+    return (uint8_t)(((int)v + 32768) >> 8);
+}
+
+// Combine keyboard and (if present) gamepad input into the pad state for a frame.
+// Buttons from both devices AND together (both are active-low, so either can
+// press a button); the gamepad drives the analog sticks, which rest centered
+// when no gamepad is connected.
+static void
+update_pad_input(SDL_Gamepad *gp, uint16_t kbd_buttons)
+{
+    uint16_t gpb = 0xFFFF;
+
+    if (gp) {
+        static const struct {
+            SDL_GamepadButton button;
+            uint16_t bit;
+        } map[] = {
+            { SDL_GAMEPAD_BUTTON_DPAD_UP,        PAD_BTN_UP },
+            { SDL_GAMEPAD_BUTTON_DPAD_DOWN,      PAD_BTN_DOWN },
+            { SDL_GAMEPAD_BUTTON_DPAD_LEFT,      PAD_BTN_LEFT },
+            { SDL_GAMEPAD_BUTTON_DPAD_RIGHT,     PAD_BTN_RIGHT },
+            { SDL_GAMEPAD_BUTTON_SOUTH,          PAD_BTN_CROSS },
+            { SDL_GAMEPAD_BUTTON_EAST,           PAD_BTN_CIRCLE },
+            { SDL_GAMEPAD_BUTTON_WEST,           PAD_BTN_SQUARE },
+            { SDL_GAMEPAD_BUTTON_NORTH,          PAD_BTN_TRIANGLE },
+            { SDL_GAMEPAD_BUTTON_START,          PAD_BTN_START },
+            { SDL_GAMEPAD_BUTTON_BACK,           PAD_BTN_SELECT },
+            { SDL_GAMEPAD_BUTTON_LEFT_SHOULDER,  PAD_BTN_L1 },
+            { SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, PAD_BTN_R1 },
+            { SDL_GAMEPAD_BUTTON_LEFT_STICK,     PAD_BTN_L3 },
+            { SDL_GAMEPAD_BUTTON_RIGHT_STICK,    PAD_BTN_R3 },
+        };
+
+        for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) {
+            if (SDL_GetGamepadButton(gp, map[i].button)) {
+                gpb &= ~map[i].bit;
+            }
+        }
+
+        // The analog triggers stand in for L2/R2 past a quarter press.
+        if (SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8192) {
+            gpb &= (uint16_t)~PAD_BTN_L2;
+        }
+        if (SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8192) {
+            gpb &= (uint16_t)~PAD_BTN_R2;
+        }
+
+        pad_lstick_x = axis_to_byte(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTX));
+        pad_lstick_y = axis_to_byte(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTY));
+        pad_rstick_x = axis_to_byte(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTX));
+        pad_rstick_y = axis_to_byte(SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTY));
+    } else {
+        pad_lstick_x = pad_lstick_y = 0x80;
+        pad_rstick_x = pad_rstick_y = 0x80;
+    }
+
+    pad_buttons = kbd_buttons & gpb;
 }
 
 // Boot options shared with the SDL run function (which SDL_RunApp calls with a
@@ -144,6 +213,7 @@ typedef struct {
     SDL_Renderer *renderer;
     SDL_Texture *vram_texture; // Target texture handle for rendering
     SDL_AudioStream *audio;    // SPU output sink (NULL if audio failed to open)
+    SDL_Gamepad *gamepad;      // open analog gamepad, or NULL (keyboard only)
     bool is_running;
     bool full_vram_view;       // F1 toggles between display area and full VRAM
 } AppContext;
@@ -232,7 +302,7 @@ jonboy_runapp(int argc, char *argv[])
     (void)argc, (void)argv;
 
     // 1. Initialize SDL3 subsystems
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         SDL_Log("SDL_Init Error: %s", SDL_GetError());
         return 1;
     }
@@ -328,6 +398,8 @@ jonboy_runapp(int argc, char *argv[])
     double counts_per_sec = (double)SDL_GetPerformanceFrequency();
 
     // 4. Core Emulation Frame Execution Loop
+    uint16_t kbd_buttons = 0xFFFF; // keyboard button mask, active low
+
     while (app.is_running) {
         SDL_Event event;
 
@@ -340,19 +412,46 @@ jonboy_runapp(int argc, char *argv[])
                     app.is_running = false;
                 } else if (event.key.key == SDLK_F1) {
                     app.full_vram_view = !app.full_vram_view;
+                } else if (event.key.key == SDLK_TAB && !event.key.repeat) {
+                    pad_toggle_analog(); // ANALOG button
+                    printf("Pad analog mode %s\n",
+                           pad_analog_mode() ? "on" : "off");
                 }
 
                 uint16_t bit = pad_bit_for_key(event.key.key);
                 if (bit) {
-                    pad_buttons &= ~bit; // active low: pressed clears the bit
+                    kbd_buttons &= ~bit; // active low: pressed clears the bit
                 }
             } else if (event.type == SDL_EVENT_KEY_UP) {
                 uint16_t bit = pad_bit_for_key(event.key.key);
                 if (bit) {
-                    pad_buttons |= bit; // released sets the bit
+                    kbd_buttons |= bit; // released sets the bit
                 }
+            } else if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
+                if (!app.gamepad) {
+                    app.gamepad = SDL_OpenGamepad(event.gdevice.which);
+                    if (app.gamepad) {
+                        printf("Gamepad connected: %s\n",
+                               SDL_GetGamepadName(app.gamepad));
+                    }
+                }
+            } else if (event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+                if (app.gamepad &&
+                    event.gdevice.which == SDL_GetGamepadID(app.gamepad)) {
+                    SDL_CloseGamepad(app.gamepad);
+                    app.gamepad = NULL;
+                    printf("Gamepad disconnected\n");
+                }
+            } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+                       event.gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) {
+                pad_toggle_analog(); // gamepad ANALOG/home button
+                printf("Pad analog mode %s\n",
+                       pad_analog_mode() ? "on" : "off");
             }
         }
+
+        // Fold this frame's keyboard and gamepad state into the pad.
+        update_pad_input(app.gamepad, kbd_buttons);
 
         // High-precision clock timing step delta calculation
         uint64_t current_time = SDL_GetPerformanceCounter();
@@ -399,6 +498,9 @@ jonboy_runapp(int argc, char *argv[])
     }
 
     // 6. Clean Cleanup Strategy
+    if (app.gamepad) {
+        SDL_CloseGamepad(app.gamepad);
+    }
     if (app.audio) {
         SDL_DestroyAudioStream(app.audio);
     }

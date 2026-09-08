@@ -2,17 +2,28 @@
 
 ## controller port
 
-Current state: a digital pad in slot 1 works. pad.c drives the SIO0 transfer
-(0x01 address, 0x42 read, 0x5A, two button bytes) and pulses the acknowledge
-interrupt (IRQ_PAD) after each byte but the last. Buttons come from pad_buttons,
-active low, driven by the host keyboard in the SDL window. Slot 2 and the memory
-card address report no device.
+Current state: a DualShock in slot 1 works in both digital and analog mode. pad.c
+drives the SIO0 transfer (0x01 address, then the command byte and data) and pulses
+the acknowledge interrupt (IRQ_PAD) after each byte but the last. Buttons come from
+pad_buttons (active low) and the analog sticks from pad_rstick_*/pad_lstick_*. The
+SDL window feeds both the keyboard and, when one is connected, a real SDL gamepad:
+its sticks drive the analog axes, its buttons/dpad/triggers combine with the
+keyboard (active-low AND), and hotplug is handled. Slot 2 reports no device; the
+memory card (0x81) answers via mc.c when mounted.
 
 - [~] support the 4 main controller port types:
   - [x] Standard Digital Pad ID: 0x41
   - [ ] Standard Analog Flightstick ID: 0x53
-  - [ ] DualShock Analog Pad ID: 0x73 (analog mode). Reports 0x41 in digital
-    mode; the ANALOG button toggles between the two, so handle both IDs.
+  - [x] DualShock Analog Pad ID: 0x73. Powers up in digital mode (0x41) and enters
+    analog mode (0x73) through the config command sequence (0x43 enter config, 0x44
+    set analog, 0x43 exit) or the ANALOG button (host Tab key, pad_toggle_analog).
+    Config mode reports ID 0xF3 and answers the status/capability queries (0x45,
+    0x46, 0x47, 0x4C, 0x4D) with the DualShock constants from pcsx-redux. Analog
+    poll appends the four stick axes. Input: keyboard (L2/R2/L3/R3 on E/R/C/V,
+    ANALOG on Tab) plus a real SDL gamepad when connected (sticks to the axes,
+    buttons/dpad/triggers to the pad, guide button toggles analog, hotplug
+    handled). Unit tested (test_pad.c, `make pad-test`). Digital poll stays
+    byte-identical, so FFT still boots unchanged.
   - [ ] PS1 Keyboard ID: 0x96. High nibble 9 marks the keyboard device class. Low nibble 6 follows the standard controller-ID convention: 6 half-words, so 12 data bytes, of payload. see [[REF/kbpoll.c]], [[REF/keyboard.h]] (modifier flags and scancode table), [[REF/kbpoll-6kro.txt]]
     - Payload size sets the key rollover. The baseline poll in REF/kbpoll.c returns only 3 data bytes (modifier + 2 scancodes), which is a 2-key-rollover simplification and under-delivers what the 0x96 ID advertises. A full 0x96 device returns the 12 data bytes the ID promises (modifier + up to ~8 scancode slots) for 6KRO to 8KRO. Decide which frame size to emulate.
     - SPI Byte-Level Frame Layout (baseline 6-byte frame: 3 header + 3 data)

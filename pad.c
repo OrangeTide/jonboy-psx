@@ -1,6 +1,7 @@
 #include "pad.h"
 #include "cpu.h"
 #include "mc.h"
+#include <string.h>
 
 // SIO0 (controller / memory-card port) in slot 1. The BIOS/game addresses a
 // device by asserting select, then clocking a command through the transmit
@@ -36,6 +37,9 @@
 
 uint16_t pad_buttons = 0xFFFF; // active low: 0xFFFF = nothing pressed
 
+uint8_t pad_rstick_x = 0x80, pad_rstick_y = 0x80;
+uint8_t pad_lstick_x = 0x80, pad_lstick_y = 0x80;
+
 static struct {
     uint8_t rx_data;  // last byte shifted back from the device
     int rx_ready;     // a received byte is waiting to be read
@@ -46,6 +50,30 @@ static struct {
     uint16_t ctrl;
     uint16_t baud;
 } sio;
+
+// DualShock controller state. It powers up in digital mode (ID 0x41) and a game
+// puts it into analog mode (ID 0x73) through the config-mode command sequence, or
+// the player toggles it with the ANALOG button. In config mode the ID is 0xF3.
+static struct {
+    int analog_mode;  // 0 = digital (0x41), 1 = analog (0x73)
+    int config_mode;  // in the escape/config command mode (ID 0xF3)
+    uint8_t cmd;      // command byte of the current transaction
+    uint8_t id;       // ID byte returned at position 1
+    uint8_t buf[8];   // response bytes; buf[0] unused (id is returned instead)
+    int buf_len;      // number of response bytes (id plus buf[1..buf_len-1])
+} pad;
+
+void
+pad_toggle_analog(void)
+{
+    pad.analog_mode = !pad.analog_mode;
+}
+
+int
+pad_analog_mode(void)
+{
+    return pad.analog_mode;
+}
 
 void
 psx_pad_reset(void)
@@ -58,39 +86,177 @@ psx_pad_reset(void)
     sio.mode = 0;
     sio.ctrl = 0;
     sio.baud = 0;
+
+    pad.analog_mode = 0;
+    pad.config_mode = 0;
 }
 
-// Compute the byte the digital pad shifts back for transaction position `pos`
-// and say (via *ack) whether it pulses acknowledge after it.
-static uint8_t
-pad_response(int pos, uint8_t cmd, int *ack)
+// Build the poll (0x42) response: the ID, "data follows" (0x5A), the two button
+// bytes and, in analog mode, the four stick axes.
+static void
+pad_build_poll(void)
 {
-    (void)cmd;
-    *ack = 0;
+    pad.buf[1] = 0x5A;
+    pad.buf[2] = (uint8_t)(pad_buttons & 0xFF);
+    pad.buf[3] = (uint8_t)(pad_buttons >> 8);
 
-    switch (pos) {
-    case 0:
+    if (pad.analog_mode || pad.config_mode) {
+        pad.id = pad.config_mode ? 0xF3 : 0x73;
+        pad.buf[4] = pad_rstick_x;
+        pad.buf[5] = pad_rstick_y;
+        pad.buf[6] = pad_lstick_x;
+        pad.buf[7] = pad_lstick_y;
+        pad.buf_len = 8;
+    } else {
+        pad.id = 0x41;
+        pad.buf_len = 4;
+    }
+}
+
+// Build the response for a transaction whose command byte just arrived. Fills
+// pad.id, pad.buf[1..], and pad.buf_len. Command constants follow the DualShock
+// model in REF/pcsx-redux/src/core/pad.cc.
+static void
+pad_build(uint8_t cmd)
+{
+    pad.cmd = cmd;
+    memset(pad.buf, 0, sizeof pad.buf);
+
+    if (cmd == 0x42) { // poll
+        pad_build_poll();
+        return;
+    }
+
+    if (cmd == 0x43) { // enter/exit config mode
+        if (pad.config_mode) {
+            pad.id = 0xF3;
+            pad.buf[1] = 0x5A; // buf[2..7] stay zero
+            pad.buf_len = 8;
+        } else {
+            pad_build_poll(); // outside config this reads like a normal poll
+        }
+        return;
+    }
+
+    if (pad.config_mode) {
+        pad.id = 0xF3;
+        pad.buf[1] = 0x5A;
+        pad.buf_len = 8;
+
+        switch (cmd) {
+        case 0x44: // set major mode (digital/analog); arg applied at position 3
+            break;
+        case 0x45: // read controller status/model
+            pad.buf[2] = 0x01;
+            pad.buf[3] = 0x02;
+            pad.buf[4] = pad.analog_mode ? 0x01 : 0x00;
+            pad.buf[5] = 0x02;
+            pad.buf[6] = 0x01;
+            pad.buf[7] = 0x00;
+            break;
+        case 0x46: // constant capability data; arg selects the variant
+            pad.buf[4] = 0x01;
+            pad.buf[5] = 0x02;
+            pad.buf[6] = 0x00;
+            pad.buf[7] = 0x0A;
+            break;
+        case 0x47: // constant capability data
+            pad.buf[4] = 0x02;
+            pad.buf[5] = 0x00;
+            pad.buf[6] = 0x01;
+            pad.buf[7] = 0x00;
+            break;
+        case 0x4C: // constant capability data; arg sets buf[5]
+            break;
+        case 0x4D: // configure rumble motor mapping
+            pad.buf[2] = 0xFF;
+            pad.buf[3] = 0xFF;
+            pad.buf[4] = 0xFF;
+            pad.buf[5] = 0xFF;
+            pad.buf[6] = 0xFF;
+            pad.buf[7] = 0xFF;
+            break;
+        default: // unknown config command: no device response
+            pad.id = 0xFF;
+            pad.buf_len = 0;
+            break;
+        }
+        return;
+    }
+
+    // Unknown command outside config mode: nothing answers.
+    pad.id = 0xFF;
+    pad.buf_len = 0;
+}
+
+// Apply a command's argument byte (transaction position 3). Some commands set
+// mode from the argument, others vary their constant reply.
+static void
+pad_apply_arg(uint8_t arg)
+{
+    switch (pad.cmd) {
+    case 0x43: // enter/exit config: arg 1 enters, 0 exits (effective next frame)
+        pad.config_mode = (arg == 1);
+        break;
+    case 0x44: // set analog (1) or digital (0) mode
+        if (pad.config_mode) {
+            pad.analog_mode = (arg == 1);
+        }
+        break;
+    case 0x46:
+        if (arg == 1) {
+            pad.buf[4] = 0x01;
+            pad.buf[5] = 0x01;
+            pad.buf[6] = 0x01;
+            pad.buf[7] = 0x14;
+        }
+        break;
+    case 0x47:
+        if (arg != 0) {
+            pad.buf[4] = pad.buf[5] = pad.buf[6] = pad.buf[7] = 0x00;
+        }
+        break;
+    case 0x4C:
+        if (arg == 0) {
+            pad.buf[5] = 0x04;
+        } else if (arg == 1) {
+            pad.buf[5] = 0x07;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+// Compute the byte the DualShock shifts back for transaction position `pos` and
+// say (via *ack) whether it pulses acknowledge after it. The pad acknowledges
+// every byte except the last of the transaction.
+static uint8_t
+pad_response(int pos, uint8_t val, int *ack)
+{
+    if (pos == 0) {
         *ack = 1;
         return 0xFF; // addressed (0x01): presence acknowledge
-
-    case 1:
-        *ack = 1;
-        return 0x41; // digital pad identifier
-
-    case 2:
-        *ack = 1;
-        return 0x5A; // "data follows"
-
-    case 3:
-        *ack = 1;
-        return (uint8_t)(pad_buttons & 0xFF); // buttons, active low
-
-    case 4:
-        return (uint8_t)(pad_buttons >> 8);   // final byte, no acknowledge
-
-    default:
-        return 0xFF;
     }
+
+    if (pos == 1) {
+        pad_build(val); // val is the command byte
+        *ack = (pad.buf_len > 1);
+        return pad.id;
+    }
+
+    if (pos == 3) {
+        pad_apply_arg(val);
+    }
+
+    // Positions 2..buf_len return buf[1..buf_len-1]; the last one does not ack.
+    if (pos >= 2 && pos <= pad.buf_len) {
+        *ack = (pos < pad.buf_len);
+        return pad.buf[pos - 1];
+    }
+
+    *ack = 0;
+    return 0xFF;
 }
 
 uint32_t
