@@ -256,6 +256,29 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
 - [ ] stream file bytes over the backdoor so the guest can read image data
   directly (needed once the menu wants thumbnails, metadata, or CD sectors)
 
+## Presentation and threading
+
+- [x] run the emulation core on its own thread (windowed build only). The
+  deterministic core (CPU, GPU, SPU, DMA, CD) runs on a dedicated emu thread
+  (main.c, emu_thread, started by SDL_CreateThread in jonboy_runapp); the SDL
+  main thread only pumps events, samples input, and presents. So a slow present
+  or a blocked event pump (a window drag) no longer stalls emulation or audio,
+  and a hitch in emulation no longer starves input. The core stays
+  single-threaded internally, so it remains deterministic, and the headless,
+  --boot, and --exe modes keep their own single-threaded loops (unchanged;
+  reference traces and conformance unaffected). Seams: the emu thread publishes a
+  linear VRAM snapshot at end of frame under frame_lock (transposed off-lock into
+  a private buffer, so the lock covers one memcpy); the main thread uploads that
+  and presents, paced by vsync. Input is the pad globals the main thread writes
+  and the emu thread reads (single words, a torn read is harmless). Audio is
+  pushed from the emu thread straight to the SDL stream, whose own callback thread
+  drains it, so it keeps playing through a main-thread stall. Shutdown sets an
+  atomic stop flag, joins the emu thread, then stops the CD worker.
+  - [ ] optional: triple-buffer the frame snapshot so neither thread ever waits
+    on the other's 1 MB copy (currently a brief lock hold on each side).
+  - [ ] optional: let the SDL audio callback pull the SPU ring directly instead
+    of the emu thread pushing, for tighter audio latency.
+
 ## Debugging
 
 - [ ] add gdbserver interface. mipsel-unknown-elf-gdb exists

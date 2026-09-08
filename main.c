@@ -216,9 +216,27 @@ typedef struct {
     SDL_Texture *vram_texture; // Target texture handle for rendering
     SDL_AudioStream *audio;    // SPU output sink (NULL if audio failed to open)
     SDL_Gamepad *gamepad;      // open analog gamepad, or NULL (keyboard only)
-    bool is_running;
     bool full_vram_view;       // F1 toggles between display area and full VRAM
+
+    // The deterministic emulation core runs on its own thread so a slow present
+    // or a blocked event pump (a window drag) never stalls emulation or audio,
+    // and vice versa. The main thread owns events, input, and presentation.
+    SDL_Thread *emu;
+    SDL_AtomicInt running;     // 0 stops the emu thread (set by the main thread)
+
+    // Frame handoff: the emu thread publishes a linear snapshot of VRAM here at
+    // the end of each emulated frame; the main thread uploads it and presents.
+    SDL_Mutex *frame_lock;
+    int frame_dx, frame_dy, frame_dw, frame_dh; // display area within the snapshot
+    int frame_blank;                            // display disabled this frame
+    int frame_ready;                            // a snapshot has been published
 } AppContext;
+
+// Linear row-major BGR555 snapshots of VRAM. g_frame_pixels is the shared front
+// buffer (guarded by frame_lock); g_frame_back is the emu thread's private buffer
+// it transposes into before publishing, so the lock is held only for one memcpy.
+static uint16_t g_frame_pixels[VRAM_HEIGHT * VRAM_WIDTH];
+static uint16_t g_frame_back[VRAM_HEIGHT * VRAM_WIDTH];
 
 // SPU output is 44.1 kHz stereo 16-bit. Drain the SPU ring after each emulated
 // frame and hand it to the audio device, keeping at most a short backlog so the
@@ -248,54 +266,121 @@ pump_audio(AppContext *app)
     }
 }
 
+// Emu thread: transpose the column-major VRAM into a linear snapshot and publish
+// it for the main thread to present. The transpose runs off the lock in a private
+// buffer, so frame_lock is held only long enough to copy the finished snapshot.
 static void
-render_vram_to_screen(AppContext* app)
+publish_frame(AppContext *app)
 {
-    void* pixels;
-    int pitch;
-
-    // 1. Lock the texture for active pixel write access
-    // This gives us direct access to the backbuffer streaming pointer
-    if (!SDL_LockTexture(app->vram_texture, NULL, &pixels, &pitch)) {
-        SDL_Log("Failed to lock texture: %s", SDL_GetError());
-        return;
-    }
-
-    uint16_t* dst_pixels = (uint16_t*)pixels;
-    int dst_pitch_pixels = pitch / sizeof(uint16_t);
-
-    // 2. Transpose the 2D VRAM array into the linear target texture memory
-    // Optimized for CPU cache line streaming
     for (int y = 0; y < VRAM_HEIGHT; y++) {
-        uint16_t* row_dest = &dst_pixels[y * dst_pitch_pixels];
-
+        uint16_t *row = &g_frame_back[(size_t)y * VRAM_WIDTH];
         for (int x = 0; x < VRAM_WIDTH; x++) {
-            // Map the layout from 2D coordinates straight to sequential scanlines
-            row_dest[x] = vram.canvas[x][y];
+            row[x] = vram.canvas[x][y];
         }
     }
 
-    // 3. Unlock to submit the changes to the host GPU
-    SDL_UnlockTexture(app->vram_texture);
+    SDL_LockMutex(app->frame_lock);
+    memcpy(g_frame_pixels, g_frame_back, sizeof g_frame_pixels);
+    app->frame_dx = gpu.disp_x;
+    app->frame_dy = gpu.disp_y;
+    app->frame_dw = gpu.disp_w;
+    app->frame_dh = gpu.disp_h;
+    app->frame_blank = gpu.disp_blank;
+    app->frame_ready = 1;
+    SDL_UnlockMutex(app->frame_lock);
+}
 
-    // 4. Render and upscale onto the screen canvas
+// Main thread: upload the latest published snapshot to the texture and present.
+static void
+present_frame(AppContext *app)
+{
+    void *pixels;
+    int pitch;
+    int dx, dy, dw, dh, blank, ready;
+
+    SDL_LockMutex(app->frame_lock);
+    ready = app->frame_ready;
+    dx = app->frame_dx;
+    dy = app->frame_dy;
+    dw = app->frame_dw;
+    dh = app->frame_dh;
+    blank = app->frame_blank;
+    if (ready && SDL_LockTexture(app->vram_texture, NULL, &pixels, &pitch)) {
+        uint8_t *dst = pixels;
+        for (int y = 0; y < VRAM_HEIGHT; y++) {
+            memcpy(dst + (size_t)y * pitch,
+                   &g_frame_pixels[(size_t)y * VRAM_WIDTH],
+                   VRAM_WIDTH * sizeof(uint16_t));
+        }
+        SDL_UnlockTexture(app->vram_texture);
+    }
+    SDL_UnlockMutex(app->frame_lock);
+
     SDL_SetRenderDrawColor(app->renderer, 0, 0, 0, 255);
     SDL_RenderClear(app->renderer);
 
-    if (app->full_vram_view) {
-        // Debug view: show the entire 1024x512 VRAM stretched to the window.
-        SDL_RenderTexture(app->renderer, app->vram_texture, NULL, NULL);
-    } else if (!gpu.disp_blank) {
-        // Normal view: show only the GPU's display area, as a TV would. When
-        // the display is disabled the window stays cleared (black).
-        SDL_FRect src = {
-            (float)gpu.disp_x, (float)gpu.disp_y,
-            (float)gpu.disp_w, (float)gpu.disp_h
-        };
-        SDL_RenderTexture(app->renderer, app->vram_texture, &src, NULL);
+    if (ready) {
+        if (app->full_vram_view) {
+            // Debug view: the entire 1024x512 VRAM stretched to the window.
+            SDL_RenderTexture(app->renderer, app->vram_texture, NULL, NULL);
+        } else if (!blank) {
+            // Normal view: only the GPU's display area, as a TV would. A disabled
+            // display leaves the window cleared (black).
+            SDL_FRect src = { (float)dx, (float)dy, (float)dw, (float)dh };
+            SDL_RenderTexture(app->renderer, app->vram_texture, &src, NULL);
+        }
     }
 
     SDL_RenderPresent(app->renderer);
+}
+
+// The emulation thread: run the deterministic core (CPU, GPU, SPU, DMA, CD) paced
+// to real time, push audio, and publish each finished frame. It reads pad input
+// from the globals the main thread updates. Nothing here touches SDL video.
+static int SDLCALL
+emu_thread(void *data)
+{
+    AppContext *app = data;
+    int kernel_up = 0;
+    int sideloaded = 0;
+
+    uint64_t last_time = SDL_GetPerformanceCounter();
+    double accumulator = 0.0;
+    double time_bridge = 1.0 / TARGET_FPS;
+    double counts_per_sec = (double)SDL_GetPerformanceFrequency();
+
+    while (SDL_GetAtomicInt(&app->running)) {
+        uint64_t now = SDL_GetPerformanceCounter();
+        accumulator += (double)(now - last_time) / counts_per_sec;
+        last_time = now;
+
+        // Cap the backlog so a slow patch never spirals into endless catch-up.
+        if (accumulator > 4.0 * time_bridge) {
+            accumulator = 4.0 * time_bridge;
+        }
+
+        int ran = 0;
+        while (accumulator >= time_bridge && SDL_GetAtomicInt(&app->running)) {
+            for (uint32_t step = 0; step < STEPS_PER_FRAME; step++) {
+                if (cpu.halted) {
+                    break;
+                }
+                service_loader_boot(&kernel_up, &sideloaded);
+                step_cpu();
+            }
+            accumulator -= time_bridge;
+            pump_audio(app);
+            ran = 1;
+        }
+
+        // Publish once per outer pass, showing the latest state rather than every
+        // caught-up frame that would never be seen.
+        if (ran) {
+            publish_frame(app);
+        }
+        SDL_Delay(1);
+    }
+    return 0;
 }
 
 int SDLCALL
@@ -309,7 +394,8 @@ jonboy_runapp(int argc, char *argv[])
         return 1;
     }
 
-    AppContext app = { .is_running = true };
+    AppContext app = { 0 };
+    SDL_SetAtomicInt(&app.running, 1);
 
     // 2. Create an SDL3 window and hardware-accelerated renderer
     if (!SDL_CreateWindowAndRenderer("JonBoy Toy Console (R3051)", 1024, 512, 0, &app.window, &app.renderer)) {
@@ -317,6 +403,12 @@ jonboy_runapp(int argc, char *argv[])
         SDL_Quit();
         return 1;
     }
+
+    // Pace presentation to the display refresh so the main thread does not spin.
+    // The emulation thread keeps its own real-time pacing independently.
+    SDL_SetRenderVSync(app.renderer, 1);
+
+    app.frame_lock = SDL_CreateMutex();
 
     // CREATE THE VRAM UPLOAD TEXTURE:
     // PSX VRAM pixels are 5-5-5: bit15 = mask/STP, bits14-10 = blue,
@@ -393,30 +485,28 @@ jonboy_runapp(int argc, char *argv[])
     // the windowed path does this; the deterministic run modes read synchronously.
     cdrom_io_start();
 
-    // Loader boot progress, driven by service_loader_boot each step: the menu is
-    // sideloaded at kernel-up and a menu selection loads or boots here.
-    int kernel_up = 0;
-    int sideloaded = 0;
+    // 4. Start the emulation thread. It runs the deterministic core; this main
+    // thread stays free to pump events, sample input, and present frames, so a
+    // slow present or a blocked event pump never stalls emulation or audio.
+    app.emu = SDL_CreateThread(emu_thread, "jonboy-emu", &app);
+    if (!app.emu) {
+        SDL_Log("Failed to start emulation thread: %s", SDL_GetError());
+        SDL_SetAtomicInt(&app.running, 0);
+    }
 
-    // Timing tracking variables using SDL3's high-resolution performance counters
-    uint64_t last_time = SDL_GetPerformanceCounter();
-    double accumulator = 0.0;
-    double time_bridge = 1.0 / TARGET_FPS; // ~0.016666 seconds per frame
-    double counts_per_sec = (double)SDL_GetPerformanceFrequency();
-
-    // 4. Core Emulation Frame Execution Loop
+    // 5. Main thread: events, input, and presentation.
     uint16_t kbd_buttons = 0xFFFF; // keyboard button mask, active low
 
-    while (app.is_running) {
+    while (SDL_GetAtomicInt(&app.running)) {
         SDL_Event event;
 
         // Handle window closure events and keyboard escapes
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) {
-                app.is_running = false;
+                SDL_SetAtomicInt(&app.running, 0);
             } else if (event.type == SDL_EVENT_KEY_DOWN) {
                 if (event.key.key == SDLK_ESCAPE) {
-                    app.is_running = false;
+                    SDL_SetAtomicInt(&app.running, 0);
                 } else if (event.key.key == SDLK_F1) {
                     app.full_vram_view = !app.full_vram_view;
                 } else if (event.key.key == SDLK_TAB && !event.key.repeat) {
@@ -459,56 +549,27 @@ jonboy_runapp(int argc, char *argv[])
 
         // Fold this frame's keyboard and gamepad state into the pad, unless a
         // script is driving the controller (it sets the pad state at VBLANK).
+        // The emu thread reads these globals; the values are single words, so a
+        // torn read is harmless (at worst one frame of mixed input).
         if (!script_active()) {
             update_pad_input(app.gamepad, kbd_buttons);
         }
 
-        // High-precision clock timing step delta calculation
-        uint64_t current_time = SDL_GetPerformanceCounter();
-        double elapsed_seconds = (double)(current_time - last_time) / counts_per_sec;
-        last_time = current_time;
-        accumulator += elapsed_seconds;
-
-        // Cap the backlog so we never try to catch up more than a few frames.
-        // Without this, if a frame's worth of CPU steps takes longer than one
-        // real frame (a slower host, or the window was dragged/paused so the
-        // accumulator ballooned), the catch-up loop below would run frame after
-        // frame and never return to poll events, so the close button and keys
-        // would stop responding. Dropping the backlog keeps input responsive.
-        if (accumulator > 4.0 * time_bridge) {
-            accumulator = 4.0 * time_bridge;
-        }
-
-        // Process a complete frame chunk if our time accumulator step threshold
-        // is passed. Bail out immediately if a quit event arrived, so closing
-        // the window does not wait for the whole backlog to drain.
-        while (accumulator >= time_bridge && app.is_running) {
-
-            // Run one frame's worth of CPU steps to match 60 Hz timing.
-            for (uint32_t step = 0; step < STEPS_PER_FRAME; step++) {
-                if (cpu.halted) {
-                    break;
-                }
-
-                service_loader_boot(&kernel_up, &sideloaded);
-                step_cpu(); // interrupts are recognized inside step_cpu
-            }
-
-            accumulator -= time_bridge;
-
-            // Hand this frame's SPU output to the sound device.
-            pump_audio(&app);
-
-            // 5. Call optimized video renderer hook
-            render_vram_to_screen(&app);
-        }
-
-        // Prevent your host CPU from pinning to 100% core usage between cycles
+        // Present the latest published frame. VSync paces this loop; SDL_Delay is
+        // a fallback when vsync is unavailable (a dummy video driver).
+        present_frame(&app);
         SDL_Delay(1);
     }
 
-    // 6. Clean Cleanup Strategy
+    // 6. Clean Cleanup Strategy: stop the emu thread before tearing anything down.
+    SDL_SetAtomicInt(&app.running, 0);
+    if (app.emu) {
+        SDL_WaitThread(app.emu, NULL);
+    }
     cdrom_io_stop();
+    if (app.frame_lock) {
+        SDL_DestroyMutex(app.frame_lock);
+    }
     if (app.gamepad) {
         SDL_CloseGamepad(app.gamepad);
     }
