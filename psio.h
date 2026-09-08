@@ -17,6 +17,7 @@ typedef struct {
     char games_dir[LDR_MAX_PATH];
     char entry_name[LDR_MAX_ENTRIES][LDR_MAX_NAME]; // display names
     char entry_path[LDR_MAX_ENTRIES][LDR_MAX_PATH]; // full host paths
+    uint8_t entry_type[LDR_MAX_ENTRIES];            // LDR_TYPE_*
     int  entry_count;
     int  sel_index;                                 // entry the guest selected
 
@@ -59,6 +60,11 @@ typedef struct {
 #define LDR_STAT_READY 0x01u // idle, ready for a command
 #define LDR_STAT_DATA  0x02u // the name FIFO holds unread bytes
 
+// Bootable entry types. A PS-EXE is loaded over RAM once the kernel is up; a CD
+// image is mounted and the machine reboots so the BIOS boots the disc.
+#define LDR_TYPE_EXE 0u
+#define LDR_TYPE_CD  1u
+
 extern PsioDevice psio;
 bool load_virtual_sd_card(const char *filepath);
 bool load_psio_firmware(const char *filepath);
@@ -73,6 +79,7 @@ void loader_write(uint32_t phys_addr, uint32_t value, int size);
 void loader_set_games_dir(const char *dir);
 int loader_boot_pending(void);
 const char *loader_boot_path(void);
+int loader_boot_is_cd(void); // true if the selected entry is a CD image
 void loader_clear_boot(void);
 
 #endif

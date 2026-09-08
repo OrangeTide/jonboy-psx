@@ -132,6 +132,20 @@ name_cmp(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
+// Classify a file name as a bootable entry. Returns LDR_TYPE_EXE for a PS-EXE,
+// LDR_TYPE_CD for a disc image (.cue/.bin/.iso), or -1 if it is not bootable.
+static int
+entry_type_of(const char *name)
+{
+    if (has_ext(name, ".exe")) {
+        return LDR_TYPE_EXE;
+    }
+    if (has_ext(name, ".cue") || has_ext(name, ".bin") || has_ext(name, ".iso")) {
+        return LDR_TYPE_CD;
+    }
+    return -1;
+}
+
 // Write "<games_dir>/<name>" into dst (LDR_MAX_PATH bytes). Returns 0 on success
 // or -1 if it would not fit. memcpy is used rather than snprintf so the bound is
 // an explicit runtime check the compiler can see is safe.
@@ -151,8 +165,9 @@ build_path(char *dst, const char *name)
     return 0;
 }
 
-// Rescan the games directory for bootable images. For now only PS-EXE files are
-// indexed; CD image formats come with the game-execution path later.
+// Rescan the games directory for bootable images: PS-EXE files and CD images
+// (.cue/.bin/.iso). Each entry records its type so the host boots it the right
+// way, an EXE loaded over RAM at kernel-up or a disc mounted and booted.
 static void
 loader_scan(void)
 {
@@ -174,7 +189,7 @@ loader_scan(void)
     while ((ent = readdir(d)) != NULL && psio.entry_count < LDR_MAX_ENTRIES) {
         size_t nlen = strlen(ent->d_name);
 
-        if (!has_ext(ent->d_name, ".exe") || nlen + 1 > LDR_MAX_NAME) {
+        if (entry_type_of(ent->d_name) < 0 || nlen + 1 > LDR_MAX_NAME) {
             continue;
         }
 
@@ -189,11 +204,12 @@ loader_scan(void)
     closedir(d);
 
     // Sort by display name so the menu order is stable, then rederive each path
-    // to keep it aligned with the sorted name.
+    // and type to keep them aligned with the sorted name.
     qsort(psio.entry_name, psio.entry_count, LDR_MAX_NAME, name_cmp);
 
     for (int i = 0; i < psio.entry_count; i++) {
         build_path(psio.entry_path[i], psio.entry_name[i]);
+        psio.entry_type[i] = (uint8_t)entry_type_of(psio.entry_name[i]);
     }
 }
 
@@ -298,6 +314,15 @@ loader_boot_path(void)
     }
 
     return psio.entry_path[psio.sel_index];
+}
+
+int
+loader_boot_is_cd(void)
+{
+    if (psio.sel_index < 0 || psio.sel_index >= psio.entry_count) {
+        return 0;
+    }
+    return psio.entry_type[psio.sel_index] == LDR_TYPE_CD;
 }
 
 void

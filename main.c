@@ -17,6 +17,7 @@
 #include "cdrom.h"
 #include "spu.h"
 #include "mc.h"
+#include "sched.h"
 
 // Map a host key to a digital pad button bit, or 0 if it is not a pad key.
 static uint16_t
@@ -609,23 +610,45 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
         steps++;
 
         // The guest menu picked an image and strobed the boot command. Wait
-        // until the kernel is up, then load it over RAM and jump to its entry,
-        // the same way sideloading does.
+        // until the kernel is up, then boot it.
         if (loader_boot_pending() && kernel_up) {
             const char *path = loader_boot_path();
-            uint32_t pc, gp, sp;
 
-            if (path && mem_load_exe(path, &pc, &gp, &sp) == 0) {
-                cpu.PC = pc;
-                cpu.next_pc = pc + 4;
-                cpu.regs[28] = gp;
-                cpu.regs[29] = sp;
-                cpu.regs[30] = sp;
-                printf("Loader booted %s at PC=0x%08X (step %llu)\n",
-                       path, pc, (unsigned long long)steps);
+            if (loader_boot_is_cd()) {
+                // A CD image boots the way a real disc does: mount it, then
+                // reset the machine so the BIOS runs its disc boot sequence.
+                // Stop re-sideloading the menu, and clear RAM and hardware so
+                // the reboot starts clean.
+                if (path && cdrom_mount(path) == 0) {
+                    printf("Loader mounting disc %s, rebooting (step %llu)\n",
+                           path, (unsigned long long)steps);
+                    g_sideload_exe = NULL;
+                    sideloaded = 0;
+                    kernel_up = 0;
+                    memset(system_ram, 0, RAM_SIZE);
+                    psx_hardware_reset();
+                    cpu_reset(0xBFC00000);
+                } else {
+                    fprintf(stderr, "loader: failed to mount %s\n",
+                            path ? path : "(none)");
+                }
             } else {
-                fprintf(stderr, "loader: failed to boot %s\n",
-                        path ? path : "(none)");
+                // A PS-EXE loads over RAM and jumps to its entry, the same way
+                // sideloading does.
+                uint32_t pc, gp, sp;
+
+                if (path && mem_load_exe(path, &pc, &gp, &sp) == 0) {
+                    cpu.PC = pc;
+                    cpu.next_pc = pc + 4;
+                    cpu.regs[28] = gp;
+                    cpu.regs[29] = sp;
+                    cpu.regs[30] = sp;
+                    printf("Loader booted %s at PC=0x%08X (step %llu)\n",
+                           path, pc, (unsigned long long)steps);
+                } else {
+                    fprintf(stderr, "loader: failed to boot %s\n",
+                            path ? path : "(none)");
+                }
             }
 
             loader_clear_boot();
