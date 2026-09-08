@@ -1,8 +1,10 @@
 #include "pad.h"
 #include "cpu.h"
+#include "mc.h"
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Host unit test for the controller port (pad.c): the digital pad poll, and the
@@ -29,17 +31,25 @@ check(const char *what, int got, int want)
     }
 }
 
-// Run one transaction: deassert then assert select (a rising edge resets the
-// transaction), then clock each byte of send[] and record the response.
+// Run one transaction with a given JOY_CTRL value: deassert then assert select
+// (a rising edge resets the transaction), then clock each byte of send[] and
+// record the response.
 static void
-run(const uint8_t *send, uint8_t *recv, int n)
+run_ctrl(uint16_t ctrl, const uint8_t *send, uint8_t *recv, int n)
 {
     psx_pad_write(REG_CTRL, 0x0000, 2);
-    psx_pad_write(REG_CTRL, 0x0002, 2); // CTRL_SELECT, slot 1
+    psx_pad_write(REG_CTRL, ctrl, 2);
     for (int i = 0; i < n; i++) {
         psx_pad_write(REG_DATA, send[i], 1);
         recv[i] = (uint8_t)psx_pad_read(REG_DATA, 1);
     }
+}
+
+// The common case: select slot 1 (port 0).
+static void
+run(const uint8_t *send, uint8_t *recv, int n)
+{
+    run_ctrl(0x0002, send, recv, n); // CTRL_SELECT, slot 1
 }
 
 int
@@ -128,8 +138,43 @@ main(void)
         check("analog ID after toggle", recv[1], 0x73);
     }
 
+    // ---- Slot-2 memory card, selected by the SIO port bit ---------------------
+    // A card mounted in slot 2 answers only when the port-select bit picks port 2
+    // (JOY_CTRL bit 13, 0x2000). Slot 1 has no card, so its 0x81 probe is inert.
+    {
+        const char *cardpath = "_out/_slot2.mcr";
+        remove(cardpath);
+        if (mc_mount_slot(1, cardpath) != 0) {
+            fprintf(stderr, "FAIL: mount slot-2 card\n");
+            failures++;
+        }
+
+        // Read frame 0 from the slot-2 card over port 2. The read sequence is
+        // 0x81, 0x52, then the ID/ack handshake, address, and 128 data bytes.
+        uint8_t send[140];
+        uint8_t r2[140];
+        memset(send, 0, sizeof send);
+        send[0] = 0x81; // address the memory card
+        send[1] = 0x52; // read command
+        run_ctrl(0x2002, send, r2, 140); // CTRL_SELECT | CTRL_PORT2
+
+        check("slot2 card ID 5A", r2[2], 0x5A);
+        check("slot2 card ID 5D", r2[3], 0x5D);
+        check("slot2 frame0 'M'", r2[10], 'M'); // formatted card header
+        check("slot2 frame0 'C'", r2[11], 'C');
+        check("slot2 read good", r2[139], 0x47);
+
+        // The same address on port 1 finds no card there.
+        uint8_t s1[4] = { 0x81, 0x52, 0, 0 };
+        uint8_t r1[4];
+        run_ctrl(0x0002, s1, r1, 4);
+        check("slot1 has no card", r1[2] != 0x5A, 1);
+
+        remove(cardpath);
+    }
+
     printf("%s (%d failure%s)\n",
-           failures ? "FAILED" : "PASS: digital pad and DualShock analog mode",
+           failures ? "FAILED" : "PASS: digital pad, DualShock, and slot-2 card",
            failures, failures == 1 ? "" : "s");
     return failures ? 1 : 0;
 }

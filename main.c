@@ -120,7 +120,8 @@ static const char *g_bios_path = "bios.bin"; // BIOS image to load
 static const char *g_sideload_exe = NULL;    // PS-EXE to run atop the booted kernel
 static const char *g_games_dir = NULL;       // directory the loader menu browses
 static const char *g_cd_path = NULL;         // disc image to mount (.bin/.cue)
-static const char *g_memcard_path = NULL;    // memory-card image (raw 128 KB)
+static const char *g_memcard_path = NULL;    // slot-1 memory-card image (raw 128 KB)
+static const char *g_memcard2_path = NULL;   // slot-2 memory-card image (raw 128 KB)
 static const char *g_script_path = NULL;     // timed system-event script file
 
 #define TARGET_FPS 60
@@ -484,8 +485,11 @@ jonboy_runapp(int argc, char *argv[])
         printf("PSIO boot stub injected.\n");
     }
 
-    if (g_memcard_path && mc_mount(g_memcard_path) == 0) {
-        printf("Memory card %s\n", g_memcard_path);
+    if (g_memcard_path && mc_mount_slot(0, g_memcard_path) == 0) {
+        printf("Memory card (slot 1) %s\n", g_memcard_path);
+    }
+    if (g_memcard2_path && mc_mount_slot(1, g_memcard2_path) == 0) {
+        printf("Memory card (slot 2) %s\n", g_memcard2_path);
     }
 
     if (g_games_dir) {
@@ -856,8 +860,11 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
         }
     }
 
-    if (g_memcard_path && mc_mount(g_memcard_path) == 0) {
-        printf("Memory card %s\n", g_memcard_path);
+    if (g_memcard_path && mc_mount_slot(0, g_memcard_path) == 0) {
+        printf("Memory card (slot 1) %s\n", g_memcard_path);
+    }
+    if (g_memcard2_path && mc_mount_slot(1, g_memcard2_path) == 0) {
+        printf("Memory card (slot 2) %s\n", g_memcard2_path);
     }
 
     cpu_reset(0xBFC00000);
@@ -934,8 +941,11 @@ run_gdb(int port)
             fprintf(stderr, "cd: failed to mount %s\n", g_cd_path);
         }
     }
-    if (g_memcard_path && mc_mount(g_memcard_path) == 0) {
-        printf("Memory card %s\n", g_memcard_path);
+    if (g_memcard_path && mc_mount_slot(0, g_memcard_path) == 0) {
+        printf("Memory card (slot 1) %s\n", g_memcard_path);
+    }
+    if (g_memcard2_path && mc_mount_slot(1, g_memcard2_path) == 0) {
+        printf("Memory card (slot 2) %s\n", g_memcard2_path);
     }
 
     cpu_reset(0xBFC00000);
@@ -971,7 +981,8 @@ print_usage(const char *prog)
             "  --games <dir>       directory the loader menu browses (auto-loads\n"
             "                      the menu in the windowed build; pick with the pad)\n"
             "  --cd <file>         mount a disc image (.bin or .cue)\n"
-            "  --memcard <file>    memory card image (raw 128 KB; created if absent)\n"
+            "  --memcard <file>    slot 1 memory card image (raw 128 KB; created if absent)\n"
+            "  --memcard2 <file>   slot 2 memory card image (raw 128 KB; created if absent)\n"
             "  --script <file>     run a timed system-event script (pad, disc)\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
@@ -1024,6 +1035,8 @@ main(int argc, char *argv[])
             g_cd_path = argv[++i];
         } else if (strcmp(argv[i], "--memcard") == 0 && i + 1 < argc) {
             g_memcard_path = argv[++i];
+        } else if (strcmp(argv[i], "--memcard2") == 0 && i + 1 < argc) {
+            g_memcard2_path = argv[++i];
         } else if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
             g_script_path = argv[++i];
         } else if (strcmp(argv[i], "--bios") == 0 && i + 1 < argc) {

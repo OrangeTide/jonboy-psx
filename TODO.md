@@ -72,8 +72,12 @@ separate close event.
   file is created as a freshly formatted card, and writes persist per frame to it.
   Get ID (0x53) returns the ID, acknowledge, and geometry bytes (04 00 00 80).
   Unit tested (test_mc.c, `make mc-test`: read, write, persistence, bad-checksum
-  rejection, get-id, and the FLAG transition). Not done yet: the PocketStation
-  extensions and slot 2.
+  rejection, get-id, and the FLAG transition). Slot 2 is supported: mc.c holds two
+  cards and pad.c routes a transaction to slot 0 or slot 1 by the SIO port-select
+  bit (JOY_CTRL bit 13), so a card in either port answers. Mount them with
+  --memcard (slot 1) and --memcard2 (slot 2). The slot-2 routing is unit tested
+  through the SIO layer (test_pad.c: a card in slot 2 answers only on port 2,
+  slot 1 stays inert). Not done yet: the PocketStation extensions.
 
 ## Audio
 

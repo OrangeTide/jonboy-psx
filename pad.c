@@ -3,13 +3,14 @@
 #include "mc.h"
 #include <string.h>
 
-// SIO0 (controller / memory-card port) in slot 1. The BIOS/game addresses a
+// SIO0 (the two controller / memory-card ports). The BIOS/game addresses a
 // device by asserting select, then clocking a command through the transmit
 // register one byte at a time. The addressed device replies a byte per clock and
 // pulses its acknowledge line after every byte but the last, which we model as
-// the SIO0 interrupt (IRQ_PAD). The first byte selects the device: 0x01 the
-// digital pad, 0x81 the memory card (when one is mounted). Slot 2 reports no
-// device, so those probes time out.
+// the SIO0 interrupt (IRQ_PAD). The port-select bit (JOY_CTRL bit 13) chooses
+// slot 0 or slot 1, and the first byte selects the device: 0x01 the digital pad
+// (slot 0 only), 0x81 the memory card in that slot (when one is mounted).
+// Anything with no device leaves the line floating, so the probe times out.
 
 // The device answering the current transaction.
 #define DEV_NONE 0
@@ -55,6 +56,7 @@ static struct {
     int ack_delay;    // cycles until the pending device acknowledge fires (0=none)
     int xfer_pos;     // byte index within the current transaction
     int device;       // which device is answering (DEV_*)
+    int card_slot;    // memory-card slot for the current transaction (0 or 1)
     uint16_t mode;
     uint16_t ctrl;
     uint16_t baud;
@@ -335,9 +337,9 @@ psx_pad_write(uint32_t phys_addr, uint32_t value, int size)
 
     switch (reg) {
     case REG_DATA: {
-        // A byte was clocked out. A device answers only when slot 1 is selected;
+        // A byte was clocked out. A device answers only when a port is selected;
         // otherwise the line floats to 0xFF and nothing acknowledges.
-        int selected = (sio.ctrl & CTRL_SELECT) && !(sio.ctrl & CTRL_PORT2);
+        int selected = (sio.ctrl & CTRL_SELECT);
 
         if (!selected) {
             sio.rx_data = 0xFF;
@@ -345,12 +347,18 @@ psx_pad_write(uint32_t phys_addr, uint32_t value, int size)
             break;
         }
 
-        // The first byte of a transaction selects the device.
+        // The port-select bit picks the controller port: slot 0 or slot 1.
+        int slot = (sio.ctrl & CTRL_PORT2) ? 1 : 0;
+
+        // The first byte of a transaction selects the device. The DualShock is
+        // in slot 1 (port 0) only; a memory card answers in whichever slot holds
+        // one. Anything else leaves the line floating (no device).
         if (sio.xfer_pos == 0) {
-            if ((uint8_t)value == 0x01) {
+            if ((uint8_t)value == 0x01 && slot == 0) {
                 sio.device = DEV_PAD;
-            } else if ((uint8_t)value == 0x81 && mc_present()) {
+            } else if ((uint8_t)value == 0x81 && mc_present_slot(slot)) {
                 sio.device = DEV_CARD;
+                sio.card_slot = slot;
             } else {
                 sio.device = DEV_NONE;
             }
@@ -362,7 +370,8 @@ psx_pad_write(uint32_t phys_addr, uint32_t value, int size)
             sio.rx_data = pad_response(sio.xfer_pos, (uint8_t)value, &ack);
             break;
         case DEV_CARD:
-            sio.rx_data = mc_transfer(sio.xfer_pos, (uint8_t)value, &ack);
+            sio.rx_data = mc_transfer_slot(sio.card_slot, sio.xfer_pos,
+                                           (uint8_t)value, &ack);
             break;
         default:
             sio.rx_data = 0xFF;

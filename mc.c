@@ -2,12 +2,16 @@
 #include <stdio.h>
 #include <string.h>
 
-// Memory card in slot 1. See mc.h for the image format. The SIO protocol follows
-// nocash's psx-spx and the pcsx-redux memory-card model: an 0x81 addressing byte
-// selects the card, then a command byte (0x52 read, 0x57 write) drives a fixed
-// byte sequence with the card ID (0x5A/0x5D), command acknowledge (0x5C/0x5D),
-// the 128-byte sector, a checksum (XOR of the address bytes and the data), and an
-// end byte (0x47 'G' good, 0x4E 'N' bad checksum).
+// Memory cards. See mc.h for the image format. The SIO protocol follows nocash's
+// psx-spx and the pcsx-redux memory-card model: an 0x81 addressing byte selects
+// the card, then a command byte (0x52 read, 0x57 write) drives a fixed byte
+// sequence with the card ID (0x5A/0x5D), command acknowledge (0x5C/0x5D), the
+// 128-byte sector, a checksum (XOR of the address bytes and the data), and an end
+// byte (0x47 'G' good, 0x4E 'N' bad checksum).
+//
+// Two slots are modeled, one per controller port. pad.c routes a card
+// transaction to slot 0 or slot 1 by the SIO port-select bit. The unsuffixed
+// functions operate on slot 0.
 
 // SIO response bytes.
 #define RESP_IDLE    0xFF
@@ -24,7 +28,9 @@
 #define FLAG_DIR_UNREAD 0x08
 #define FLAG_DIR_READ   0x00
 
-static struct {
+#define MC_SLOTS 2
+
+typedef struct {
     int present;
     char path[1024];
     uint8_t data[MC_SIZE];
@@ -36,7 +42,9 @@ static struct {
     uint8_t chk;         // running checksum
     uint8_t chk_in;      // checksum byte received during a write
     uint8_t temp[MC_FRAME_SIZE]; // staged write data until the checksum verifies
-} mc;
+} Card;
+
+static Card cards[MC_SLOTS];
 
 // Write byte 127 of a frame as the XOR of bytes 0..126.
 static void
@@ -52,18 +60,18 @@ frame_checksum(uint8_t *frame)
 // Lay down a freshly formatted card: the "MC" header frame, 15 free directory
 // entries, and a broken-sector list. Everything else stays zero.
 static void
-format_card(void)
+format_card(Card *c)
 {
-    memset(mc.data, 0, sizeof mc.data);
+    memset(c->data, 0, sizeof c->data);
 
     // Frame 0: header magic "MC" plus its checksum.
-    mc.data[0] = 'M';
-    mc.data[1] = 'C';
-    frame_checksum(&mc.data[0]);
+    c->data[0] = 'M';
+    c->data[1] = 'C';
+    frame_checksum(&c->data[0]);
 
     // Frames 1..15: directory entries, all free.
     for (int f = 1; f <= 15; f++) {
-        uint8_t *e = &mc.data[f * MC_FRAME_SIZE];
+        uint8_t *e = &c->data[f * MC_FRAME_SIZE];
         e[0] = 0xA0;   // block allocation state: free/formatted
         e[8] = 0xFF;   // next-block pointer: none
         e[9] = 0xFF;
@@ -72,7 +80,7 @@ format_card(void)
 
     // Frames 16..35: broken-sector list, each entry marked unused.
     for (int f = 16; f <= 35; f++) {
-        uint8_t *e = &mc.data[f * MC_FRAME_SIZE];
+        uint8_t *e = &c->data[f * MC_FRAME_SIZE];
         memset(e, 0xFF, 4);
         e[8] = 0xFF;
         e[9] = 0xFF;
@@ -81,15 +89,20 @@ format_card(void)
 }
 
 int
-mc_mount(const char *path)
+mc_mount_slot(int slot, const char *path)
 {
-    memset(&mc, 0, sizeof mc);
-    snprintf(mc.path, sizeof mc.path, "%s", path);
-    mc.flag = FLAG_DIR_UNREAD;
+    if (slot < 0 || slot >= MC_SLOTS) {
+        return -1;
+    }
+    Card *c = &cards[slot];
+
+    memset(c, 0, sizeof *c);
+    snprintf(c->path, sizeof c->path, "%s", path);
+    c->flag = FLAG_DIR_UNREAD;
 
     FILE *f = fopen(path, "rb");
     if (f) {
-        size_t got = fread(mc.data, 1, MC_SIZE, f);
+        size_t got = fread(c->data, 1, MC_SIZE, f);
         fclose(f);
         if (got != MC_SIZE) {
             fprintf(stderr, "memcard: %s is %zu bytes, expected %d\n",
@@ -98,75 +111,87 @@ mc_mount(const char *path)
         }
     } else {
         // No image yet: create a formatted card and save it.
-        format_card();
+        format_card(c);
         FILE *w = fopen(path, "wb");
         if (!w) {
             perror(path);
             return -1;
         }
-        fwrite(mc.data, 1, MC_SIZE, w);
+        fwrite(c->data, 1, MC_SIZE, w);
         fclose(w);
     }
 
-    mc.present = 1;
+    c->present = 1;
     return 0;
+}
+
+int
+mc_mount(const char *path)
+{
+    return mc_mount_slot(0, path);
+}
+
+int
+mc_present_slot(int slot)
+{
+    return slot >= 0 && slot < MC_SLOTS && cards[slot].present;
 }
 
 int
 mc_present(void)
 {
-    return mc.present;
+    return mc_present_slot(0);
 }
 
 // Persist one written frame to the backing file.
 static void
-flush_frame(int frame)
+flush_frame(Card *c, int frame)
 {
-    if (mc.path[0] == '\0') {
+    if (c->path[0] == '\0') {
         return;
     }
-    FILE *f = fopen(mc.path, "r+b");
+    FILE *f = fopen(c->path, "r+b");
     if (!f) {
         return;
     }
     fseek(f, (long)frame * MC_FRAME_SIZE, SEEK_SET);
-    fwrite(&mc.data[frame * MC_FRAME_SIZE], 1, MC_FRAME_SIZE, f);
+    fwrite(&c->data[frame * MC_FRAME_SIZE], 1, MC_FRAME_SIZE, f);
     fclose(f);
 }
 
 static uint8_t
-read_command(int pos, uint8_t value, int *ack)
+read_command(Card *c, int pos, uint8_t value, int *ack)
 {
     switch (pos) {
     case 4:
-        mc.addr = (uint16_t)value << 8;
+        c->addr = (uint16_t)value << 8;
         return 0x00;
     case 5:
-        mc.addr |= value;
-        mc.chk = (uint8_t)((mc.addr >> 8) ^ (mc.addr & 0xFF));
+        c->addr |= value;
+        c->chk = (uint8_t)((c->addr >> 8) ^ (c->addr & 0xFF));
         return 0x00;
     case 6:
         return RESP_ACK1;
     case 7:
         return RESP_ACK2;
     case 8:
-        return (uint8_t)(mc.addr >> 8);   // confirmed address MSB
+        return (uint8_t)(c->addr >> 8);   // confirmed address MSB
     case 9:
-        return (uint8_t)(mc.addr & 0xFF); // confirmed address LSB
+        return (uint8_t)(c->addr & 0xFF); // confirmed address LSB
     case 138:
-        return mc.chk;                    // checksum
+        return c->chk;                    // checksum
     case 139:
         *ack = 0;                         // last byte: no acknowledge
-        mc.flag = FLAG_DIR_READ;
+        c->flag = FLAG_DIR_READ;
         return RESP_GOOD;
     default:
         if (pos >= 10 && pos <= 137) {
             int i = pos - 10;
             uint8_t d = 0xFF;
-            if (mc.addr < MC_FRAMES) {
-                d = mc.data[mc.addr * MC_FRAME_SIZE + i];
+            if (c->addr < MC_FRAMES) {
+                d = c->data[c->addr * MC_FRAME_SIZE + i];
             }
-            mc.chk ^= d;
+            c->chk ^= d;
             return d;
         }
         *ack = 0;
@@ -175,18 +200,18 @@ read_command(int pos, uint8_t value, int *ack)
 }
 
 static uint8_t
-write_command(int pos, uint8_t value, int *ack)
+write_command(Card *c, int pos, uint8_t value, int *ack)
 {
     switch (pos) {
     case 4:
-        mc.addr = (uint16_t)value << 8;
+        c->addr = (uint16_t)value << 8;
         return 0x00;
     case 5:
-        mc.addr |= value;
-        mc.chk = (uint8_t)((mc.addr >> 8) ^ (mc.addr & 0xFF));
+        c->addr |= value;
+        c->chk = (uint8_t)((c->addr >> 8) ^ (c->addr & 0xFF));
         return 0x00;
     case 134:
-        mc.chk_in = value; // checksum from the console
+        c->chk_in = value; // checksum from the console
         return 0x00;
     case 135:
         return RESP_ACK1;
@@ -194,21 +219,21 @@ write_command(int pos, uint8_t value, int *ack)
         return RESP_ACK2;
     case 137:
         *ack = 0; // last byte: no acknowledge
-        if (mc.addr >= MC_FRAMES) {
+        if (c->addr >= MC_FRAMES) {
             return RESP_BADSEC;
         }
-        if (mc.chk_in != mc.chk) {
+        if (c->chk_in != c->chk) {
             return RESP_BADCHK;
         }
-        memcpy(&mc.data[mc.addr * MC_FRAME_SIZE], mc.temp, MC_FRAME_SIZE);
-        flush_frame(mc.addr);
-        mc.flag = FLAG_DIR_READ;
+        memcpy(&c->data[c->addr * MC_FRAME_SIZE], c->temp, MC_FRAME_SIZE);
+        flush_frame(c, c->addr);
+        c->flag = FLAG_DIR_READ;
         return RESP_GOOD;
     default:
         if (pos >= 6 && pos <= 133) {
             int i = pos - 6;
-            mc.temp[i] = value;
-            mc.chk ^= value;
+            c->temp[i] = value;
+            c->chk ^= value;
             return 0x00;
         }
         *ack = 0;
@@ -243,38 +268,45 @@ id_command(int pos, int *ack)
 }
 
 uint8_t
-mc_transfer(int pos, uint8_t value, int *ack)
+mc_transfer_slot(int slot, int pos, uint8_t value, int *ack)
 {
     *ack = 1;
 
-    if (!mc.present) {
+    if (slot < 0 || slot >= MC_SLOTS || !cards[slot].present) {
         *ack = 0;
         return RESP_IDLE;
     }
+    Card *c = &cards[slot];
 
     switch (pos) {
     case 0:            // 0x81 addressing byte
-        mc.cmd = 0;
+        c->cmd = 0;
         return RESP_IDLE;
     case 1:            // command byte
-        mc.cmd = value;
-        return mc.flag;
+        c->cmd = value;
+        return c->flag;
     case 2:
         return RESP_ID1;
     case 3:
         return RESP_ID2;
     }
 
-    if (mc.cmd == 0x52) {
-        return read_command(pos, value, ack);
+    if (c->cmd == 0x52) {
+        return read_command(c, pos, value, ack);
     }
-    if (mc.cmd == 0x57) {
-        return write_command(pos, value, ack);
+    if (c->cmd == 0x57) {
+        return write_command(c, pos, value, ack);
     }
-    if (mc.cmd == 0x53) {
+    if (c->cmd == 0x53) {
         return id_command(pos, ack);
     }
 
     *ack = 0;
     return RESP_IDLE;
+}
+
+uint8_t
+mc_transfer(int pos, uint8_t value, int *ack)
+{
+    return mc_transfer_slot(0, pos, value, ack);
 }

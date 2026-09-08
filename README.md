@@ -59,6 +59,7 @@ Mount a disc image and boot it through a retail BIOS:
 `--cd` accepts a `.bin`, `.cue` (including multi-track), or `.iso`. Add
 `--memcard card.mcr` to attach a memory card (a raw 128 KB image, created and
 formatted if the file does not exist), so the BIOS shell and games can save.
+`--memcard2 card2.mcr` attaches a second card in the other controller port.
 
 The windowed emulator runs the console on a separate thread from the window, so
 input, video, and audio stay responsive even when emulation stalls, and a disc
