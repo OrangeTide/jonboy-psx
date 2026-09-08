@@ -2,6 +2,7 @@
 #include "cpu.h"
 #include "lebytes.h"
 
+#include <stdatomic.h>
 #include <string.h>
 
 // SPU with 24-voice ADPCM synthesis. Each voice reads 16-byte ADPCM blocks from
@@ -103,10 +104,15 @@ build_env_tables(void)
 }
 
 // Output ring of interleaved 16-bit stereo frames, produced by the mixer and
-// drained by the app. Same thread on both ends, so no locking is needed.
+// drained by spu_output_pull. This is a single-producer/single-consumer ring:
+// the emulation thread writes (mix_frame) and, in the windowed build, the SDL
+// audio callback thread reads. The two index counters are atomic with
+// release/acquire ordering so the reader sees a frame's data before it sees the
+// advanced write index, and the writer sees space the reader has freed. The ring
+// size is a power of two so the free-running counters mask straight to an index.
 #define SPU_RING_FRAMES 8192
 static int16_t spu_ring[SPU_RING_FRAMES * 2];
-static unsigned spu_ring_w, spu_ring_r;
+static _Atomic unsigned spu_ring_w, spu_ring_r;
 
 // CD audio waiting to be mixed. spu_cd_audio fills this; the mixer drains one
 // frame per output frame.
@@ -194,7 +200,8 @@ psx_spu_reset(void)
     spu_xfer_addr = 0;
     spu_endx = 0;
     spu_irq_flag = 0;
-    spu_ring_w = spu_ring_r = 0;
+    atomic_store_explicit(&spu_ring_w, 0, memory_order_relaxed);
+    atomic_store_explicit(&spu_ring_r, 0, memory_order_relaxed);
     cd_fifo_w = cd_fifo_r = 0;
     spu_cycle_acc = 0;
     build_env_tables();
@@ -690,11 +697,13 @@ mix_frame(void)
     l += (cdl * mainl) >> 15;
     r += (cdr * mainr) >> 15;
 
-    if (spu_ring_w - spu_ring_r < SPU_RING_FRAMES) {
-        unsigned i = (spu_ring_w & (SPU_RING_FRAMES - 1)) * 2;
+    unsigned wr = atomic_load_explicit(&spu_ring_w, memory_order_relaxed);
+    unsigned rd = atomic_load_explicit(&spu_ring_r, memory_order_acquire);
+    if (wr - rd < SPU_RING_FRAMES) {
+        unsigned i = (wr & (SPU_RING_FRAMES - 1)) * 2;
         spu_ring[i] = clamp16(l);
         spu_ring[i + 1] = clamp16(r);
-        spu_ring_w++;
+        atomic_store_explicit(&spu_ring_w, wr + 1, memory_order_release);
     }
 }
 
@@ -888,13 +897,16 @@ int
 spu_output_pull(int16_t *dst, int max_frames)
 {
     int n = 0;
+    unsigned r = atomic_load_explicit(&spu_ring_r, memory_order_relaxed);
+    unsigned w = atomic_load_explicit(&spu_ring_w, memory_order_acquire);
 
-    while (n < max_frames && spu_ring_r != spu_ring_w) {
-        unsigned i = (spu_ring_r & (SPU_RING_FRAMES - 1)) * 2;
+    while (n < max_frames && r != w) {
+        unsigned i = (r & (SPU_RING_FRAMES - 1)) * 2;
         dst[n * 2] = spu_ring[i];
         dst[n * 2 + 1] = spu_ring[i + 1];
-        spu_ring_r++;
+        r++;
         n++;
     }
+    atomic_store_explicit(&spu_ring_r, r, memory_order_release);
     return n;
 }

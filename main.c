@@ -246,31 +246,32 @@ static struct {
     int dx, dy, dw, dh, blank;
 } g_frame_meta[FRAME_BUFS];
 
-// SPU output is 44.1 kHz stereo 16-bit. Drain the SPU ring after each emulated
-// frame and hand it to the audio device, keeping at most a short backlog so the
-// sound stays near the picture.
+// SPU output is 44.1 kHz stereo 16-bit. The audio device pulls on demand through
+// this callback, which runs on SDL's own audio thread and drains the SPU ring.
+// So audio is produced by the emu thread and consumed here, decoupled from the
+// main thread entirely: a blocked event pump or slow present cannot starve it.
 #define AUDIO_RATE 44100
-#define AUDIO_MAX_QUEUED_FRAMES (AUDIO_RATE / 5) // ~0.2 s latency cap
 
-static void
-pump_audio(AppContext *app)
+static void SDLCALL
+audio_callback(void *userdata, SDL_AudioStream *stream, int additional, int total)
 {
-    if (!app->audio) {
-        return;
-    }
+    (void)userdata;
+    (void)total;
 
+    // Feed only what the device asked for. The SPU ring bounds how far ahead
+    // emulation can run; if it is empty (an underrun) we simply hand over less,
+    // and SDL fills the gap with silence.
+    int frames = additional / (int)(2 * sizeof(int16_t));
     int16_t buf[1024 * 2];
-    int n;
-    while ((n = spu_output_pull(buf, 1024)) > 0) {
-        // Drop rather than let latency grow without bound if emulation runs
-        // ahead of real time.
-        int queued = SDL_GetAudioStreamQueued(app->audio) / (int)(2 * sizeof(int16_t));
-        if (queued < AUDIO_MAX_QUEUED_FRAMES) {
-            SDL_PutAudioStreamData(app->audio, buf, n * 2 * (int)sizeof(int16_t));
-        }
-        if (n < 1024) {
+
+    while (frames > 0) {
+        int want = frames > 1024 ? 1024 : frames;
+        int n = spu_output_pull(buf, want);
+        if (n <= 0) {
             break;
         }
+        SDL_PutAudioStreamData(stream, buf, n * 2 * (int)sizeof(int16_t));
+        frames -= n;
     }
 }
 
@@ -385,7 +386,6 @@ emu_thread(void *data)
                 step_cpu();
             }
             accumulator -= time_bridge;
-            pump_audio(app);
             ran = 1;
         }
 
@@ -452,7 +452,7 @@ jonboy_runapp(int argc, char *argv[])
     // fatal: the emulator runs silently.
     SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, AUDIO_RATE };
     app.audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
-                                          &spec, NULL, NULL);
+                                          &spec, audio_callback, NULL);
     if (app.audio) {
         SDL_ResumeAudioStreamDevice(app.audio);
     } else {

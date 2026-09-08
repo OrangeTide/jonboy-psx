@@ -281,8 +281,15 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
     exchanges its private index with that slot (SDL_SetAtomicInt), so the two
     threads never touch the same buffer and neither copies under a lock. The
     display geometry travels with each buffer in g_frame_meta.
-  - [ ] optional: let the SDL audio callback pull the SPU ring directly instead
-    of the emu thread pushing, for tighter audio latency.
+  - [x] let the SDL audio callback pull the SPU ring directly (main.c
+    audio_callback, registered with SDL_OpenAudioDeviceStream) instead of the emu
+    thread pushing. The device now drains the SPU on demand from SDL's own audio
+    thread, so audio is decoupled from the main thread entirely and a slow present
+    or blocked event pump cannot starve it. The SPU output ring (spu.c) became a
+    cross-thread single-producer/single-consumer queue: its two index counters are
+    C11 atomics with release/acquire ordering (no SDL dependency added), so the
+    reader sees a frame's samples before the advanced write index. On an underrun
+    the callback feeds less and SDL pads with silence.
 
 ## Debugging
 
