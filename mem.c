@@ -100,8 +100,7 @@ mem_read(uint32_t v_addr, int size)
 }
 
 // Decode a physical address to its region and write a sized value. Sub-word
-// MMIO writes are approximated for now; the CPU-facing sub-word registers used
-// so far take full words.
+// MMIO writes merge into the addressed byte lane of the containing word.
 static void
 mem_write(uint32_t v_addr, uint32_t value, int size)
 {
@@ -139,7 +138,22 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
     } else if (a >= PAD_BASE && a < PAD_BASE + PAD_SIZE) {
         psx_pad_write(a, value, size);
     } else if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
-        write_hardware_word(a & ~3u, value);
+        uint32_t aligned = a & ~3u;
+
+        if (size == 4) {
+            write_hardware_word(aligned, value);
+        } else {
+            // Sub-word write: merge the written bytes into their lane of the
+            // aligned word, leaving the rest intact. Games do byte and halfword
+            // writes to individual register fields (for example the DMA
+            // interrupt register's enable byte at 0x1F8010F6), so the value has
+            // to land in the addressed lane, not the low bytes of the word.
+            uint32_t shift = (a & 3u) * 8;
+            uint32_t mask  = ((size == 1) ? 0xFFu : 0xFFFFu) << shift;
+            uint32_t word  = read_hardware_word(aligned);
+            word = (word & ~mask) | ((value << shift) & mask);
+            write_hardware_word(aligned, word);
+        }
     }
 
     // BIOS is read-only; anything else is unmapped and ignored.
