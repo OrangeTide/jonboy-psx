@@ -4,7 +4,13 @@
 
 Current state: a DualShock in slot 1 works in both digital and analog mode. pad.c
 drives the SIO0 transfer (0x01 address, then the command byte and data) and pulses
-the acknowledge interrupt (IRQ_PAD) after each byte but the last. Buttons come from
+the acknowledge interrupt (IRQ_PAD) after each byte but the last. The acknowledge
+fires a short delay after the byte (psx_pad_tick, clocked from psx_hardware_tick,
+SIO_ACK_DELAY_CYCLES), not on the same cycle as the data write, the way the
+hardware pulses /ACK. Raising it synchronously let a driver that clears the SIO0
+interrupt right after each byte, then waits for the acknowledge (psyqo's memory
+card driver, and the BIOS), swallow it before the wait and read the port as having
+no device. Buttons come from
 pad_buttons (active low) and the analog sticks from pad_rstick_*/pad_lstick_*. The
 SDL window feeds both the keyboard and, when one is connected, a real SDL gamepad:
 its sticks drive the analog axes, its buttons/dpad/triggers combine with the
