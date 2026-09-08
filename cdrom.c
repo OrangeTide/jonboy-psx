@@ -3,6 +3,7 @@
 #include "mem.h"
 #include "spu.h"
 #include "xa.h"
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -46,6 +47,12 @@
 #define FIFO_MAX 16
 #define QUEUE_MAX 8
 #define RAW_SECTOR 2352
+
+// Sectors the async prefetch worker reads ahead of the drive cursor.
+#define PREFETCH_DEPTH 16
+// When an async sector is not fetched yet, the read/play pump retries after this
+// many cycles instead of blocking, so the rest of the machine keeps running.
+#define CDROM_RETRY_DELAY 2000
 
 // The pregap that precedes LBA 0. An MSF address of 00:02:00 is LBA 0, so a
 // disc-relative LBA maps to a file sector index directly.
@@ -142,6 +149,39 @@ static struct {
 // machine is running. Defined below, after enqueue/status_byte.
 static void lid_event(void);
 
+// Asynchronous sector prefetch. In the windowed build a worker thread reads raw
+// sectors ahead of the drive cursor into this ring, so a slow disc image (for
+// example one on a network mount) never blocks the CPU/render/input thread on an
+// fread. On a cache miss the read pump defers a sector rather than blocking; the
+// data is delivered once the worker has fetched it. When async is off (headless,
+// --boot, --exe, and the unit tests) reads are synchronous and bit-for-bit
+// deterministic, so the reference-trace and conformance workflows are unchanged.
+static struct {
+    int async;                  // worker running (windowed build only)
+    pthread_t thread;
+    pthread_mutex_t lock;
+    pthread_cond_t wake;        // wake the worker (room freed, seek, or quit)
+    pthread_cond_t parked_cv;   // worker signals it has parked for a disc change
+
+    int quit;
+    int pause_req;              // ask the worker to park before a disc change
+    int parked;                 // worker is parked and not touching disc files
+
+    // Ring of consecutive fetched sectors. slot (head_index + i) % PREFETCH_DEPTH
+    // holds the sector at head_lba + i, for i in [0, count).
+    struct {
+        uint8_t data[RAW_SECTOR];
+    } slots[PREFETCH_DEPTH];
+    int head_index;
+    int head_lba;               // absolute LBA the drive will consume next
+    int count;                  // buffered sectors starting at head_lba
+    unsigned gen;               // bumped on seek/disc change to void in-flight reads
+} pf;
+
+static int  read_raw_sync(int lba, uint8_t *buf);
+static void pf_suspend(void);
+static void pf_resume_reset(void);
+
 static int
 bcd2bin(uint8_t b)
 {
@@ -158,9 +198,12 @@ void
 psx_cdrom_reset(void)
 {
     // The disc image lives in its own struct, so clearing the controller state
-    // does not eject it.
+    // does not eject it. Park the prefetch worker across the reset so it does not
+    // fetch against half-cleared state, then flush its ring.
+    pf_suspend();
     memset(&cd, 0, sizeof cd);
     xa_reset();
+    pf_resume_reset();
 }
 
 int
@@ -229,8 +272,12 @@ disc_eject(void)
 void
 cdrom_eject(void)
 {
+    // Park the prefetch worker before closing the files it reads, then flush its
+    // stale ring and let it resume against the now-empty drive.
+    pf_suspend();
     disc_eject();
     lid_event();
+    pf_resume_reset();
 }
 
 // Mount a raw single-file image (.bin/.iso) as one data track at LBA 0.
@@ -370,6 +417,9 @@ cdrom_mount(const char *path)
     int is_cue = n > 4 && (strcmp(path + n - 4, ".cue") == 0 ||
                            strcmp(path + n - 4, ".CUE") == 0);
 
+    // Park the prefetch worker while the disc files change under it, then flush
+    // its ring so it refetches from the new image.
+    pf_suspend();
     disc_eject();
 
     int rc = is_cue ? mount_cue(path) : mount_raw(path);
@@ -378,6 +428,7 @@ cdrom_mount(const char *path)
         // sees the new disc rather than only noticing it on its next read.
         lid_event();
     }
+    pf_resume_reset();
     return rc;
 }
 
@@ -433,39 +484,211 @@ fill_locp(uint8_t out[8], int lba)
     out[7] = bin2bcd(af % 75);
 }
 
-// Read the raw sector at an absolute LBA into buf. Returns 0 on success.
+// Read the raw sector at an absolute LBA into buf. Returns 1 on success, 0 when
+// no track covers the LBA or the seek fails. This is the blocking fetch: in the
+// windowed build the prefetch worker calls it off the emulation thread.
 static int
-read_raw(int lba, uint8_t *buf)
+read_raw_sync(int lba, uint8_t *buf)
 {
     Track *t = track_at_lba(lba);
     if (!t) {
-        return -1;
+        return 0;
     }
 
     FILE *f = disc.files[t->file_idx];
     long pos = (long)(lba - t->file_start_lba) * RAW_SECTOR;
     if (fseek(f, pos, SEEK_SET) != 0) {
-        return -1;
+        return 0;
     }
 
     size_t got = fread(buf, 1, RAW_SECTOR, f);
     if (got < RAW_SECTOR) {
         memset(buf + got, 0, RAW_SECTOR - got);
     }
-    return 0;
+    return 1;
+}
+
+// Consume the sector at lba from the prefetch ring. Returns 1 with the bytes in
+// buf when ready, or 0 when the worker has not fetched it yet. A request for a
+// sector that is not the ring head (a seek) resets the ring to refetch from lba;
+// a request for the head with an empty ring (an underrun) leaves the worker
+// fetching that same sector and just waits, so an in-flight read is not voided.
+static int
+pf_consume(int lba, uint8_t *buf)
+{
+    int ready = 0;
+
+    pthread_mutex_lock(&pf.lock);
+    if (pf.count > 0 && pf.head_lba == lba) {
+        memcpy(buf, pf.slots[pf.head_index].data, RAW_SECTOR);
+        pf.head_index = (pf.head_index + 1) % PREFETCH_DEPTH;
+        pf.head_lba++;
+        pf.count--;
+        ready = 1;
+    } else if (pf.head_lba != lba) {
+        pf.head_index = 0;
+        pf.head_lba = lba;
+        pf.count = 0;
+        pf.gen++;
+    }
+    pthread_cond_signal(&pf.wake);
+    pthread_mutex_unlock(&pf.lock);
+    return ready;
+}
+
+// Fetch the raw sector at an absolute LBA. Returns 1 with the bytes in buf when
+// available, or 0 when the async worker has not fetched it yet. Synchronous mode
+// always returns whatever read_raw_sync reports.
+static int
+cd_get_sector(int lba, uint8_t *buf)
+{
+    if (pf.async) {
+        return pf_consume(lba, buf);
+    }
+    return read_raw_sync(lba, buf);
+}
+
+// The prefetch worker: read sectors ahead of the drive cursor into the ring. The
+// slow fread runs with the lock released so the emulation thread never blocks on
+// it. The disc files are stable during a read because a disc change only happens
+// while the worker is parked (pf_suspend), never mid-read.
+static void *
+pf_worker(void *arg)
+{
+    (void)arg;
+    uint8_t tmp[RAW_SECTOR];
+
+    pthread_mutex_lock(&pf.lock);
+    for (;;) {
+        if (pf.quit) {
+            break;
+        }
+        if (pf.pause_req) {
+            pf.parked = 1;
+            pthread_cond_signal(&pf.parked_cv);
+            while (pf.pause_req && !pf.quit) {
+                pthread_cond_wait(&pf.wake, &pf.lock);
+            }
+            pf.parked = 0;
+            continue;
+        }
+        if (!disc.has_disc || pf.count >= PREFETCH_DEPTH) {
+            pthread_cond_wait(&pf.wake, &pf.lock);
+            continue;
+        }
+
+        int target = pf.head_lba + pf.count;
+        int slot = (pf.head_index + pf.count) % PREFETCH_DEPTH;
+        unsigned gen = pf.gen;
+
+        pthread_mutex_unlock(&pf.lock);
+        int ok = read_raw_sync(target, tmp);
+        pthread_mutex_lock(&pf.lock);
+
+        // A seek or disc change while we were reading voids this sector. The
+        // slot index and target stay valid under plain consumes (both shift by
+        // the same amount), so only a generation change discards the read.
+        if (!ok || pf.gen != gen) {
+            if (!ok && pf.gen == gen) {
+                // Unreadable (no disc/track): wait for a state change rather
+                // than spinning on it.
+                pthread_cond_wait(&pf.wake, &pf.lock);
+            }
+            continue;
+        }
+        memcpy(pf.slots[slot].data, tmp, RAW_SECTOR);
+        pf.count++;
+    }
+    pthread_mutex_unlock(&pf.lock);
+    return NULL;
+}
+
+// Park the worker so no fread is in flight, making it safe to change the disc
+// files or clear the controller. No-op when the worker is not running.
+static void
+pf_suspend(void)
+{
+    if (!pf.async) {
+        return;
+    }
+    pthread_mutex_lock(&pf.lock);
+    pf.pause_req = 1;
+    pthread_cond_signal(&pf.wake);
+    while (!pf.parked) {
+        pthread_cond_wait(&pf.parked_cv, &pf.lock);
+    }
+    pthread_mutex_unlock(&pf.lock);
+}
+
+// Flush the ring and let a parked worker resume against the new disc state.
+static void
+pf_resume_reset(void)
+{
+    if (!pf.async) {
+        return;
+    }
+    pthread_mutex_lock(&pf.lock);
+    pf.head_index = 0;
+    pf.head_lba = 0;
+    pf.count = 0;
+    pf.gen++;
+    pf.pause_req = 0;
+    pthread_cond_signal(&pf.wake);
+    pthread_mutex_unlock(&pf.lock);
+}
+
+void
+cdrom_io_start(void)
+{
+    if (pf.async) {
+        return;
+    }
+    pthread_mutex_init(&pf.lock, NULL);
+    pthread_cond_init(&pf.wake, NULL);
+    pthread_cond_init(&pf.parked_cv, NULL);
+    pf.quit = 0;
+    pf.pause_req = 0;
+    pf.parked = 0;
+    pf.head_index = 0;
+    pf.head_lba = 0;
+    pf.count = 0;
+    pf.gen = 0;
+    pf.async = 1;
+    if (pthread_create(&pf.thread, NULL, pf_worker, NULL) != 0) {
+        pf.async = 0; // fall back to synchronous reads
+    }
+}
+
+void
+cdrom_io_stop(void)
+{
+    if (!pf.async) {
+        return;
+    }
+    pthread_mutex_lock(&pf.lock);
+    pf.quit = 1;
+    pthread_cond_signal(&pf.wake);
+    pthread_mutex_unlock(&pf.lock);
+    pthread_join(pf.thread, NULL);
+    pthread_mutex_destroy(&pf.lock);
+    pthread_cond_destroy(&pf.wake);
+    pthread_cond_destroy(&pf.parked_cv);
+    pf.async = 0;
 }
 
 // Decode one CD-DA sector at play_lba to interleaved 16-bit stereo PCM and hand
 // it to the SPU CD-audio input, which is where it will be mixed once the SPU can
 // emit sound. A muted drive still advances but sends silence.
-static void
+// Decode the CD-DA sector at play_lba and hand it to the SPU. Returns 1 when a
+// sector was produced, or 0 when it is not fetched yet (async, slow disc).
+static int
 play_audio_sector(void)
 {
     uint8_t raw[RAW_SECTOR];
     int16_t pcm[CDDA_FRAMES * 2];
 
-    if (read_raw(cd.play_lba, raw) != 0) {
-        return;
+    if (!cd_get_sector(cd.play_lba, raw)) {
+        return 0;
     }
 
     if (cd.muted) {
@@ -478,6 +701,7 @@ play_audio_sector(void)
     }
 
     spu_cd_audio(pcm, CDDA_FRAMES);
+    return 1;
 }
 
 static void
@@ -550,32 +774,22 @@ deliver_next(void)
 
 // Load the sector at read_lba into the data buffer, honoring the mode's sector
 // size. Mode2/Form1 user data is 2048 bytes at offset 24; a whole-sector read is
-// 2340 bytes at offset 12 (after the 12-byte sync).
-static void
+// 2340 bytes at offset 12 (after the 12-byte sync). Returns 1 when a sector was
+// loaded, or 0 when it is not fetched yet (async, slow disc), in which case the
+// read pump retries without advancing.
+static int
 load_sector(void)
 {
     uint8_t raw[RAW_SECTOR];
+
+    if (!cd_get_sector(cd.read_lba, raw)) {
+        return 0;
+    }
 
     cd.data_len = 0;
     cd.data_ptr = 0;
     cd.sector_started = 0;
     cd.xa_audio = 0;
-
-    Track *t = track_at_lba(cd.read_lba);
-    if (!t) {
-        return;
-    }
-
-    FILE *f = disc.files[t->file_idx];
-    long pos = (long)(cd.read_lba - t->file_start_lba) * RAW_SECTOR;
-    if (fseek(f, pos, SEEK_SET) != 0) {
-        return;
-    }
-
-    size_t got = fread(raw, 1, RAW_SECTOR, f);
-    if (got < RAW_SECTOR) {
-        memset(raw + got, 0, RAW_SECTOR - got);
-    }
 
     // Keep the 4-byte header and 4 bytes of subheader for GetlocL.
     memcpy(cd.last_header, raw + 12, 8);
@@ -597,7 +811,7 @@ load_sector(void)
             xa_decode_sector(raw + 24, raw[19]);
         }
         cd.xa_audio = 1;
-        return;
+        return 1;
     }
 
     if (cd.mode & 0x20) {
@@ -607,6 +821,7 @@ load_sector(void)
         cd.data_len = 2048;
         memcpy(cd.data_buf, raw + 24, 2048);
     }
+    return 1;
 }
 
 static void
@@ -819,25 +1034,30 @@ psx_cdrom_tick(uint32_t cycles)
     if (cd.reading && cd.irq_flags == 0 && cd.queue_count == 0) {
         cd.read_delay -= (int)cycles;
         if (cd.read_delay <= 0) {
-            load_sector();
-            cd.read_lba++;
-
-            // An XA audio sector was consumed by the SPU, so no data sector is
-            // delivered to the CPU. Keep the drive streaming to the next sector.
-            if (!cd.xa_audio) {
-                uint8_t stat[1] = { status_byte() };
-                enqueue(INT1, stat, 1);
-                deliver_next();
-            }
-
-            // XA streaming reads at the real disc rate so the decoded audio
-            // feeds the SPU at the correct pitch. Double speed (mode bit 0x80)
-            // halves the per-sector time. Plain data reads stay fast.
-            if (cd.mode & 0x40) {
-                cd.read_delay = (cd.mode & 0x80) ? CDDA_SECTOR_CYCLES / 2
-                                                 : CDDA_SECTOR_CYCLES;
+            if (!load_sector()) {
+                // The sector is not fetched yet (async, slow disc). Retry soon
+                // without advancing; the rest of the machine keeps running.
+                cd.read_delay = CDROM_RETRY_DELAY;
             } else {
-                cd.read_delay = CDROM_READ_DELAY;
+                cd.read_lba++;
+
+                // An XA audio sector was consumed by the SPU, so no data sector
+                // is delivered to the CPU. Keep the drive streaming.
+                if (!cd.xa_audio) {
+                    uint8_t stat[1] = { status_byte() };
+                    enqueue(INT1, stat, 1);
+                    deliver_next();
+                }
+
+                // XA streaming reads at the real disc rate so the decoded audio
+                // feeds the SPU at the correct pitch. Double speed (mode bit
+                // 0x80) halves the per-sector time. Plain data reads stay fast.
+                if (cd.mode & 0x40) {
+                    cd.read_delay = (cd.mode & 0x80) ? CDDA_SECTOR_CYCLES / 2
+                                                     : CDDA_SECTOR_CYCLES;
+                } else {
+                    cd.read_delay = CDROM_READ_DELAY;
+                }
             }
         }
     }
@@ -848,27 +1068,31 @@ psx_cdrom_tick(uint32_t cycles)
         cd.play_delay -= (int)cycles;
         if (cd.play_delay <= 0) {
             Track *before = track_at_lba(cd.play_lba);
-            play_audio_sector();
-            cd.play_lba++;
+            if (!play_audio_sector()) {
+                // Audio sector not fetched yet (async, slow disc); retry soon.
+                cd.play_delay = CDROM_RETRY_DELAY;
+            } else {
+                cd.play_lba++;
 
-            int at_end = cd.play_lba >= disc.lead_out_lba;
-            Track *after = track_at_lba(cd.play_lba);
-            int crossed = before && after && before->num != after->num;
+                int at_end = cd.play_lba >= disc.lead_out_lba;
+                Track *after = track_at_lba(cd.play_lba);
+                int crossed = before && after && before->num != after->num;
 
-            if (at_end || ((cd.mode & 0x02) && crossed)) {
-                // Auto-pause at the end of the track, or stop at the lead-out.
-                cd.playing = 0;
-                uint8_t s = status_byte();
-                enqueue(INT4, &s, 1);
-                deliver_next();
-            } else if (cd.mode & 0x04) {
-                // Report mode: hand back the current position each sector.
-                uint8_t rep[8];
-                fill_locp(rep, cd.play_lba);
-                enqueue(INT1, rep, 8);
-                deliver_next();
+                if (at_end || ((cd.mode & 0x02) && crossed)) {
+                    // Auto-pause at end of track, or stop at the lead-out.
+                    cd.playing = 0;
+                    uint8_t s = status_byte();
+                    enqueue(INT4, &s, 1);
+                    deliver_next();
+                } else if (cd.mode & 0x04) {
+                    // Report mode: hand back the current position each sector.
+                    uint8_t rep[8];
+                    fill_locp(rep, cd.play_lba);
+                    enqueue(INT1, rep, 8);
+                    deliver_next();
+                }
+                cd.play_delay = CDDA_SECTOR_CYCLES;
             }
-            cd.play_delay = CDDA_SECTOR_CYCLES;
         }
     }
 }

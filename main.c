@@ -388,6 +388,11 @@ jonboy_runapp(int argc, char *argv[])
     // Start execution at the CPU reset vector (BIOS entry point).
     cpu_reset(0xBFC00000);
 
+    // Prefetch CD sectors on a worker thread so a slow disc image (for example
+    // one on a network mount) never blocks input and rendering on an fread. Only
+    // the windowed path does this; the deterministic run modes read synchronously.
+    cdrom_io_start();
+
     // Loader boot progress, driven by service_loader_boot each step: the menu is
     // sideloaded at kernel-up and a menu selection loads or boots here.
     int kernel_up = 0;
@@ -503,6 +508,7 @@ jonboy_runapp(int argc, char *argv[])
     }
 
     // 6. Clean Cleanup Strategy
+    cdrom_io_stop();
     if (app.gamepad) {
         SDL_CloseGamepad(app.gamepad);
     }

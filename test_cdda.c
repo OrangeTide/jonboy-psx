@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 R3051_CPU cpu;
 uint8_t system_ram[2 * 1024 * 1024];
@@ -369,5 +370,84 @@ main(void)
 
     remove(xbin);
     remove(xcue);
+
+    // ---- Asynchronous prefetch worker: end-to-end read -----------------------
+    // Start the worker (as the windowed build does), mount a plain data disc, and
+    // stream sectors through ReadN. The worker fetches off-thread; the pump
+    // retries on a miss and delivers each sector once it is ready. The bytes must
+    // match the image, proving the async path is correct, not just non-blocking.
+    const char *abin = "_out/_async.bin";
+    const int asec = 8;
+    f = fopen(abin, "wb");
+    if (!f) { perror(abin); return 1; }
+    for (long i = 0; i < (long)asec * RAW_SECTOR; i++) {
+        uint8_t b = pat(0x5000 + i);
+        fwrite(&b, 1, 1, f);
+    }
+    fclose(f);
+
+    psx_cdrom_reset();
+    cdrom_io_start();
+    if (cdrom_mount(abin) != 0) {
+        fprintf(stderr, "mount failed\n");
+        cdrom_io_stop();
+        return 1;
+    }
+
+    cd_param(0x00); cd_param(0x02); cd_param(0x00); // Setloc 00:02:00 = LBA 0
+    cd_cmd(0x02);
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    cd_param(0x00);          // Setmode: 2048-byte user data
+    cd_cmd(0x0E);
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    cd_cmd(0x06);            // ReadN from LBA 0
+    psx_cdrom_tick(4000);
+    cd_ack();
+
+    int async_bad = 0;
+    for (int s = 0; s < 4; s++) {
+        // Pump until the sector is delivered; the worker may need a moment. On a
+        // miss the pump does not block, so we tick repeatedly with a short pause.
+        int got_it = 0;
+        for (int t = 0; t < 20000 && !got_it; t++) {
+            psx_cdrom_tick(4000);
+            cd_index(1);
+            if ((psx_cdrom_read(CDROM_BASE + 3, 1) & 0x07) == 1) {
+                got_it = 1;
+            } else {
+                usleep(100);
+            }
+        }
+        if (!got_it) {
+            fprintf(stderr, "FAIL: async sector %d never delivered\n", s);
+            cdrom_io_stop();
+            return 1;
+        }
+
+        // Read the 2048-byte user area from the data port and verify it.
+        cd_index(0);
+        psx_cdrom_write(CDROM_BASE + 3, 0x80, 1); // request data
+        long base = (long)s * RAW_SECTOR + 24;
+        for (int i = 0; i < 2048; i++) {
+            uint8_t v = (uint8_t)psx_cdrom_read(CDROM_BASE + 2, 1);
+            if (v != pat(0x5000 + base + i)) {
+                async_bad++;
+            }
+        }
+        cd_ack();
+    }
+    cdrom_io_stop();
+
+    if (async_bad) {
+        fprintf(stderr, "FAIL: async read returned %d wrong bytes\n", async_bad);
+        return 1;
+    }
+    printf("PASS: async prefetch worker streamed 4 sectors correctly\n");
+
+    remove(abin);
     return 0;
 }

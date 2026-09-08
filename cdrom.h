@@ -21,6 +21,13 @@ int cdrom_mount(const char *path);
 int cdrom_has_disc(void);
 void cdrom_eject(void);
 
+// Start/stop the asynchronous sector-prefetch worker thread. The windowed build
+// starts it so a slow disc image (for example one on a network mount) does not
+// block input and rendering on an fread. Headless, --boot, and --exe leave it
+// off, keeping reads synchronous and bit-for-bit deterministic.
+void cdrom_io_start(void);
+void cdrom_io_stop(void);
+
 // Pull `words` 32-bit words of the current sector into RAM for DMA channel 3.
 void cdrom_dma_read(uint32_t madr, uint32_t words);
 

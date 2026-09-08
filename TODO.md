@@ -123,6 +123,20 @@ separate close event.
 
 ## Storage
 
+- [x] non-blocking sector reads for slow disc images. In the windowed build a
+  prefetch worker thread (cdrom.c, started by cdrom_io_start from jonboy_runapp)
+  reads raw sectors ahead of the drive cursor into a ring, so a slow image (for
+  example one on an NFS mount) never blocks the CPU/render/input thread on an
+  fread. The read and play pumps consume from the ring; on a cache miss they
+  defer the sector by CDROM_RETRY_DELAY and retry rather than blocking, so the
+  emulated disc simply reads slower while the rest of the machine keeps running.
+  The worker is parked (pf_suspend) around any disc change so files are never
+  closed mid-read, and a generation counter voids an in-flight read after a seek
+  or swap. Headless, --boot, and --exe leave the worker off and read
+  synchronously, so those paths stay bit-for-bit deterministic (reference traces
+  and conformance unaffected). Unit tested end to end (test_cdda.c, `make
+  cdda-test`); checked race-clean under helgrind.
+
 - [x] add cd-rom support. cdrom.c mounts a .bin/.cue image (raw 2352-byte
   sectors), answers GetID as a licensed disc, and serves sectors through Setloc,
   Setmode, SeekL, ReadN/ReadS, and Pause. Sector data reaches RAM through the

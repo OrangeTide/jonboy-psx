@@ -44,7 +44,7 @@ clean ::
 $(BINDIR)/jonboy : $(EMU_SRC) | $(BINDIR)
 	$(CC) -o $@ -MMD $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS)
 $(BINDIR)/jonboy : CFLAGS:=$(CFLAGS) $(shell pkg-config --cflags sdl3)
-$(BINDIR)/jonboy : LDLIBS:=$(LDLIBS) $(shell pkg-config --libs sdl3)
+$(BINDIR)/jonboy : LDLIBS:=$(LDLIBS) -lpthread $(shell pkg-config --libs sdl3)
 ## amalgamation (single self-contained C file)
 # tools/amalgamate.awk inlines every local include once, so $(BINDIR)/jonboy.c
 # is a single file that builds with only the system and SDL3 headers. The
@@ -56,13 +56,13 @@ clean ::
 $(BINDIR)/jonboy.c : $(EMU_SRC) $(wildcard *.h) tools/amalgamate.awk | $(BINDIR)
 	awk -f tools/amalgamate.awk $(EMU_SRC) > $@
 $(BINDIR)/jonboy-amalg : $(BINDIR)/jonboy.c | $(BINDIR)
-	$(CC) -o $@ $(CFLAGS) $(shell pkg-config --cflags sdl3) $< $(shell pkg-config --libs sdl3)
+	$(CC) -o $@ $(CFLAGS) $(shell pkg-config --cflags sdl3) $< -lpthread $(shell pkg-config --libs sdl3)
 ## host unit tests (built without SDL: cdrom.c/spu.c with stub globals)
 all :: $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader $(BINDIR)/test_pad $(BINDIR)/test_script
 clean ::
 	$(RM) $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader $(BINDIR)/test_pad $(BINDIR)/test_script
 $(BINDIR)/test_cdda : test_cdda.c cdrom.c xa.c cdrom.h cpu.h mem.h spu.h xa.h | $(BINDIR)
-	$(CC) -o $@ $(CFLAGS) test_cdda.c cdrom.c xa.c
+	$(CC) -o $@ $(CFLAGS) test_cdda.c cdrom.c xa.c -lpthread
 $(BINDIR)/test_spu : test_spu.c spu.c spu.h cpu.h lebytes.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_spu.c spu.c
 $(BINDIR)/test_xa : test_xa.c xa.c xa.h spu.h | $(BINDIR)
