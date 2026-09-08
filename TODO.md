@@ -26,8 +26,14 @@ events fire once, and the script replays if the frame counter restarts. It runs 
 every mode, so it also gives headless runs a way to work the controller and swap
 discs (for demos, captures, and driving the menu). Not tied to pad input, so more
 event types drop in easily. Unit tested (test_script.c, `make script-test`).
-Nuance: inserting a disc mid-run swaps the image but does not yet raise the
-lid-open/close interrupt, so a game only sees it on its next read.
+A mid-run eject or disc swap now raises the drive-cover (lid) interrupt:
+cdrom_eject and a runtime cdrom_mount deliver an INT5 carrying the shell-open
+status bit (0x10), which stays set until a Getstat reads it back with a disc
+present. The event is suppressed until the game has enabled CD-ROM interrupts,
+so a cold boot with a disc already inserted (whose mount runs before the machine
+starts) is unaffected. Unit tested (test_cdda.c). Nuance: the lid interrupt is a
+single INT5 for both open and close rather than modeling the motor spin-up and a
+separate close event.
 
 - [~] support the 4 main controller port types:
   - [x] Standard Digital Pad ID: 0x41

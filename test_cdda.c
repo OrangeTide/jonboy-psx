@@ -290,6 +290,83 @@ main(void)
     }
     printf("PASS: XA filter off plays all audio sectors\n");
 
+    // ---- Drive-cover (lid) interrupt on eject and runtime swap ---------------
+    // With CD-ROM interrupts enabled (as a running game leaves them), an eject
+    // and a runtime mount each raise an INT5 carrying the shell-open status bit,
+    // and a Getstat clears the sticky bit once a disc is present again.
+    psx_cdrom_reset();
+    if (cdrom_mount(xcue) != 0) {
+        fprintf(stderr, "mount failed\n");
+        return 1;
+    }
+
+    // Enable all CD-ROM interrupts (index 1, register 2), as the BIOS/game does.
+    cd_index(1);
+    psx_cdrom_write(CDROM_BASE + 3, 0x07, 1);   // clear any queued flags
+    psx_cdrom_write(CDROM_BASE + 2, 0x1F, 1);   // irq_enable = all
+
+    cpu.i_stat = 0;
+    cdrom_eject();
+    psx_cdrom_tick(4000);
+
+    cd_index(1);
+    int flags = (int)(psx_cdrom_read(CDROM_BASE + 3, 1) & 0x07);
+    int st = (int)(psx_cdrom_read(CDROM_BASE + 1, 1) & 0xFF);
+    if (flags != 5) {
+        fprintf(stderr, "FAIL: eject did not raise INT5 (flags=%d)\n", flags);
+        return 1;
+    }
+    if (!(cpu.i_stat & (1u << IRQ_CDROM))) {
+        fprintf(stderr, "FAIL: eject did not pull the CD-ROM interrupt line\n");
+        return 1;
+    }
+    if (!(st & 0x10)) {
+        fprintf(stderr, "FAIL: eject status missing shell-open bit (0x%02X)\n", st);
+        return 1;
+    }
+    if (cdrom_has_disc()) {
+        fprintf(stderr, "FAIL: disc still present after eject\n");
+        return 1;
+    }
+    printf("PASS: eject raises the lid interrupt with shell-open set\n");
+
+    cd_ack();
+    cpu.i_stat = 0;
+    if (cdrom_mount(xcue) != 0) {           // insert a new disc
+        fprintf(stderr, "mount failed\n");
+        return 1;
+    }
+    psx_cdrom_tick(4000);
+
+    cd_index(1);
+    flags = (int)(psx_cdrom_read(CDROM_BASE + 3, 1) & 0x07);
+    st = (int)(psx_cdrom_read(CDROM_BASE + 1, 1) & 0xFF);
+    if (flags != 5 || !(cpu.i_stat & (1u << IRQ_CDROM)) || !(st & 0x10)) {
+        fprintf(stderr, "FAIL: runtime swap did not raise the lid interrupt "
+                        "(flags=%d st=0x%02X)\n", flags, st);
+        return 1;
+    }
+    printf("PASS: runtime disc swap raises the lid interrupt\n");
+
+    // Getstat reports the sticky shell-open bit, then clears it.
+    cd_ack();
+    cd_cmd(0x01);
+    psx_cdrom_tick(4000);
+    st = (int)(psx_cdrom_read(CDROM_BASE + 1, 1) & 0xFF);
+    if (!(st & 0x10)) {
+        fprintf(stderr, "FAIL: Getstat did not report shell-open (0x%02X)\n", st);
+        return 1;
+    }
+    cd_ack();
+    cd_cmd(0x01);
+    psx_cdrom_tick(4000);
+    st = (int)(psx_cdrom_read(CDROM_BASE + 1, 1) & 0xFF);
+    if (st & 0x10) {
+        fprintf(stderr, "FAIL: shell-open bit did not clear (0x%02X)\n", st);
+        return 1;
+    }
+    printf("PASS: Getstat clears the sticky shell-open bit\n");
+
     remove(xbin);
     remove(xcue);
     return 0;

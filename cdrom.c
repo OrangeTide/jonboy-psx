@@ -25,9 +25,10 @@
 #define INT5 5 // error
 
 // Status byte bits reported in responses.
-#define STAT_MOTOR 0x02 // spindle motor on
-#define STAT_READ  0x20 // reading data sectors
-#define STAT_PLAY  0x80 // playing CD-DA
+#define STAT_MOTOR      0x02 // spindle motor on
+#define STAT_SHELL_OPEN 0x10 // drive cover is or was open
+#define STAT_READ       0x20 // reading data sectors
+#define STAT_PLAY       0x80 // playing CD-DA
 
 // CD-DA sector geometry: 2352 raw bytes are 588 stereo 16-bit PCM frames.
 #define CDDA_FRAMES 588
@@ -129,7 +130,17 @@ static struct {
     // XA audio sectors whose subheader file and channel match these play.
     uint8_t filter_file;
     uint8_t filter_channel;
+
+    // Drive cover (lid) state. Set when the disc is ejected or swapped at
+    // runtime, reported in the status byte (STAT_SHELL_OPEN), and cleared by the
+    // next Getstat once a disc is present, so a game that missed the interrupt
+    // still sees the swap by polling the status.
+    int shell_open;
 } cd;
+
+// Signal that the drive cover changed (a disc was ejected or swapped) while the
+// machine is running. Defined below, after enqueue/status_byte.
+static void lid_event(void);
 
 static int
 bcd2bin(uint8_t b)
@@ -213,11 +224,13 @@ disc_eject(void)
 }
 
 // Eject the mounted disc: close the image and clear the disc state. The drive
-// controller keeps running and reports no disc until a new image is mounted.
+// controller keeps running and reports no disc until a new image is mounted. A
+// runtime eject also raises the lid-open interrupt.
 void
 cdrom_eject(void)
 {
     disc_eject();
+    lid_event();
 }
 
 // Mount a raw single-file image (.bin/.iso) as one data track at LBA 0.
@@ -359,13 +372,22 @@ cdrom_mount(const char *path)
 
     disc_eject();
 
-    return is_cue ? mount_cue(path) : mount_raw(path);
+    int rc = is_cue ? mount_cue(path) : mount_raw(path);
+    if (rc == 0) {
+        // A runtime insert or swap raises the lid interrupt so a running game
+        // sees the new disc rather than only noticing it on its next read.
+        lid_event();
+    }
+    return rc;
 }
 
 static uint8_t
 status_byte(void)
 {
     uint8_t s = STAT_MOTOR;
+    if (cd.shell_open) {
+        s |= STAT_SHELL_OPEN;
+    }
     if (cd.reading) {
         s |= STAT_READ;
     }
@@ -476,6 +498,31 @@ enqueue(uint8_t type, const uint8_t *data, int len)
     cd.queue_count++;
 }
 
+// Raise the drive-cover (lid) interrupt after an eject or a runtime disc swap.
+// The drive stops and delivers an INT5 error carrying the shell-open status bit,
+// the way the hardware signals the cover opening. The event is suppressed until
+// the game has enabled CD-ROM interrupts (irq_enable set), so a cold boot with a
+// disc already inserted, whose mount runs before the machine starts, stays quiet
+// and the boot sequence is unaffected.
+static void
+lid_event(void)
+{
+    cd.reading = 0;
+    cd.playing = 0;
+
+    if (cd.irq_enable == 0) {
+        return;
+    }
+
+    cd.shell_open = 1;
+    uint8_t err[2] = { status_byte(), 0x08 };
+    enqueue(INT5, err, 2);
+
+    if (cd.deliver_delay <= 0) {
+        cd.deliver_delay = CDROM_RESP_DELAY;
+    }
+}
+
 static void
 deliver_next(void)
 {
@@ -570,6 +617,11 @@ run_command(uint8_t cmd)
     switch (cmd) {
     case 0x01: // Getstat
         enqueue(INT3, stat, 1);
+        // Reporting the status consumes the sticky shell-open bit once a disc is
+        // present again, so the drive reads as closed after the swap is seen.
+        if (disc.has_disc) {
+            cd.shell_open = 0;
+        }
         break;
 
     case 0x02: // Setloc (amm, ass, asect in BCD)
