@@ -231,8 +231,9 @@ step_cpu(void)
     }
 
     // Fetch through the translating accessor so the virtual PC is mapped to a
-    // physical address. Never index system_ram[] directly here.
-    uint32_t inst = memory_read_word(cpu.PC);
+    // physical address. Never index system_ram[] directly here. This uses the
+    // fetch-only accessor so a data watchpoint does not trip on instruction reads.
+    uint32_t inst = mem_fetch_word(cpu.PC);
 
     // ---- ADVANCE PC (delay-slot aware) ----
     // The instruction just fetched runs now. cpu.PC moves to the slot a branch

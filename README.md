@@ -120,9 +120,10 @@ mipsel-unknown-elf-gdb
 (gdb) continue
 ```
 
-Registers, memory, breakpoints, single step (`stepi`), continue, and Ctrl-C to
-interrupt all work. Load your program's `.elf` with `file game.elf` first to get
-source-level symbols. The server listens on loopback only.
+Registers, memory, breakpoints, watchpoints (`watch`/`rwatch`/`awatch`), single
+step (`stepi`), continue, and Ctrl-C to interrupt all work. Load your program's
+`.elf` with `file game.elf` first to get source-level symbols. The server listens
+on loopback only.
 
 ## Testing
 

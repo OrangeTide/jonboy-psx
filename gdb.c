@@ -25,6 +25,23 @@ static int gdb_conn_fd = -1;
 static uint32_t gdb_breakpoints[GDB_MAX_BREAKPOINTS];
 static int gdb_num_breakpoints;
 
+#define GDB_MAX_WATCHPOINTS 32
+
+// A watchpoint. type is the gdb Z kind: 2 = write, 3 = read, 4 = access.
+static struct {
+    uint32_t addr;
+    uint32_t len;
+    int type;
+} gdb_watch[GDB_MAX_WATCHPOINTS];
+static int gdb_num_watch;
+
+// Set by the memory hook when an executing instruction touches a watched range.
+// Read (and cleared) by the step loop, which runs on the same thread, so no
+// synchronization is needed.
+static int gdb_watch_hit;
+static uint32_t gdb_watch_hit_addr;
+static int gdb_watch_hit_type;
+
 static const char gdb_hexchars[] = "0123456789abcdef";
 
 static int
@@ -253,6 +270,55 @@ gdb_remove_breakpoint(uint32_t addr)
     }
 }
 
+// Memory hook (installed while any watchpoint exists): flag a hit when an access
+// of the given kind falls in a watched range. type match: 2 = write only,
+// 3 = read only, 4 = read or write.
+static void
+gdb_watch_check(uint32_t addr, int size, int is_write)
+{
+    for (int i = 0; i < gdb_num_watch; i++) {
+        uint32_t a = gdb_watch[i].addr;
+        uint32_t l = gdb_watch[i].len;
+        if (addr < a + l && a < addr + (uint32_t)size) {
+            int t = gdb_watch[i].type;
+            if ((t == 2 && is_write) || (t == 3 && !is_write) || t == 4) {
+                gdb_watch_hit = 1;
+                gdb_watch_hit_addr = a;
+                gdb_watch_hit_type = t;
+                return;
+            }
+        }
+    }
+}
+
+static void
+gdb_add_watchpoint(uint32_t addr, uint32_t len, int type)
+{
+    if (gdb_num_watch >= GDB_MAX_WATCHPOINTS) {
+        return;
+    }
+    gdb_watch[gdb_num_watch].addr = addr;
+    gdb_watch[gdb_num_watch].len = len ? len : 1;
+    gdb_watch[gdb_num_watch].type = type;
+    gdb_num_watch++;
+    mem_watch_hook = gdb_watch_check; // arm the per-access hook
+}
+
+static void
+gdb_remove_watchpoint(uint32_t addr, uint32_t len, int type)
+{
+    for (int i = 0; i < gdb_num_watch; i++) {
+        if (gdb_watch[i].addr == addr && gdb_watch[i].type == type &&
+            gdb_watch[i].len == (len ? len : 1)) {
+            gdb_watch[i] = gdb_watch[--gdb_num_watch];
+            break;
+        }
+    }
+    if (gdb_num_watch == 0) {
+        mem_watch_hook = NULL; // no overhead once the last watchpoint is gone
+    }
+}
+
 // Non-blocking check for gdb's Ctrl-C interrupt (a bare 0x03 byte).
 static int
 gdb_interrupted(void)
@@ -278,8 +344,13 @@ gdb_continue(void (*step_hook)(void))
         if (step_hook) {
             step_hook();
         }
+        gdb_watch_hit = 0; // count only this instruction's own accesses
         step_cpu();
 
+        // A watched load or store during this instruction stops here.
+        if (gdb_watch_hit) {
+            return GDB_SIGTRAP;
+        }
         // cpu.PC is now the next instruction to run; stop before executing a
         // breakpoint so gdb sees the machine halted at that address.
         if (gdb_is_breakpoint(cpu.PC)) {
@@ -298,9 +369,27 @@ gdb_step(void (*step_hook)(void))
         if (step_hook) {
             step_hook();
         }
+        gdb_watch_hit = 0;
         step_cpu();
     }
     return GDB_SIGTRAP;
+}
+
+// Build the stop reply: a plain S packet, or a T packet naming the watchpoint
+// when the stop was a watched access, so gdb reports the right watchpoint.
+static void
+gdb_send_stop(int sig)
+{
+    char r[64];
+    if (gdb_watch_hit) {
+        const char *kind = gdb_watch_hit_type == 2 ? "watch"
+                           : gdb_watch_hit_type == 3 ? "rwatch"
+                           : "awatch";
+        snprintf(r, sizeof r, "T%02x%s:%x;", GDB_SIGTRAP, kind, gdb_watch_hit_addr);
+    } else {
+        snprintf(r, sizeof r, "S%02x", sig);
+    }
+    gdb_send(r);
 }
 
 // Answer a qXfer:features:read:target.xml:OFF,LEN request with the right slice.
@@ -450,9 +539,7 @@ gdb_handle(const char *buf, void (*step_hook)(void))
             cpu.PC = a;
             cpu.next_pc = a + 4;
         }
-        char r[4];
-        snprintf(r, sizeof r, "S%02x", gdb_continue(step_hook));
-        gdb_send(r);
+        gdb_send_stop(gdb_continue(step_hook));
         break;
     }
 
@@ -463,17 +550,17 @@ gdb_handle(const char *buf, void (*step_hook)(void))
             cpu.PC = a;
             cpu.next_pc = a + 4;
         }
-        char r[4];
-        snprintf(r, sizeof r, "S%02x", gdb_step(step_hook));
-        gdb_send(r);
+        gdb_send_stop(gdb_step(step_hook));
         break;
     }
 
     case 'Z':
     case 'z': {
-        // Z0 (software) and Z1 (hardware) breakpoints are handled the same way,
-        // as an address the step loop watches. Watchpoints (2-4) are unsupported.
-        if (buf[1] == '0' || buf[1] == '1') {
+        // Z0 (software) and Z1 (hardware) breakpoints are both tracked as an
+        // address the step loop watches. Z2/Z3/Z4 are write/read/access
+        // watchpoints, with the length in the kind field ("Z2,addr,len").
+        char kind = buf[1];
+        if (kind == '0' || kind == '1') {
             const char *s = buf + 2;
             if (*s == ',') {
                 s++;
@@ -483,6 +570,23 @@ gdb_handle(const char *buf, void (*step_hook)(void))
                 gdb_add_breakpoint(addr);
             } else {
                 gdb_remove_breakpoint(addr);
+            }
+            gdb_send("OK");
+        } else if (kind == '2' || kind == '3' || kind == '4') {
+            const char *s = buf + 2;
+            if (*s == ',') {
+                s++;
+            }
+            uint32_t addr = gdb_parse_hex(&s);
+            uint32_t len = 1;
+            if (*s == ',') {
+                s++;
+                len = gdb_parse_hex(&s);
+            }
+            if (buf[0] == 'Z') {
+                gdb_add_watchpoint(addr, len, kind - '0');
+            } else {
+                gdb_remove_watchpoint(addr, len, kind - '0');
             }
             gdb_send("OK");
         } else {
@@ -590,6 +694,7 @@ gdb_run(void (*step_hook)(void))
 void
 gdb_stop(void)
 {
+    mem_watch_hook = NULL; // disarm the per-access hook
     if (gdb_conn_fd >= 0) {
         close(gdb_conn_fd);
         gdb_conn_fd = -1;

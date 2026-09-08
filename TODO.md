@@ -302,8 +302,13 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
   hi, badvaddr, cause, pc, and a zeroed FPU bank) declared to gdb through a
   target description over qXfer, so gdb parses the layout without guessing. The
   continue loop calls service_loader_boot, so sideload and the loader menu work
-  under gdb too. Verified end to end with mipsel-unknown-elf-gdb: connect,
-  register and memory read/write round-trips, a breakpoint at a BIOS address,
-  continue, and single step. Not done: watchpoints (Z2-Z4), a target.xml with
-  real FPU/GTE registers, and running the gdbserver alongside the windowed build.
+  under gdb too. Watchpoints (Z2 write, Z3 read, Z4 access) are supported: mem.c
+  has an optional per-access hook (armed only while a watchpoint exists, and
+  bypassed by the instruction fetch via mem_fetch_word), the step loop stops when
+  a watched load or store fires, and the stop reply is a T packet naming the
+  watchpoint so gdb reports it. Verified end to end with mipsel-unknown-elf-gdb:
+  connect, register and memory read/write round-trips, a breakpoint at a BIOS
+  address, continue, single step, and a write watchpoint that stops on the store
+  with the correct old/new values. Not done: a target.xml with real FPU/GTE
+  registers, and running the gdbserver alongside the windowed build.
 - [ ] add a handler so that a hotkey (or signal) will output CPU regs and a short stack trace.

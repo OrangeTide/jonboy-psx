@@ -58,6 +58,17 @@ void memory_write_word(uint32_t v_addr, uint32_t value);
 void memory_write_halfword(uint32_t v_addr, uint32_t value);
 void memory_write_byte(uint32_t v_addr, uint32_t value);
 
+// Instruction fetch: reads a word like memory_read_word but never invokes the
+// watchpoint hook, so a data watchpoint does not trip on the fetch of the code
+// it is watching. The CPU fetch path uses this.
+uint32_t mem_fetch_word(uint32_t v_addr);
+
+// Optional debugger watchpoint hook. When non-NULL, the CPU data accessors above
+// call it on each load/store with the address, size in bytes, and whether it is
+// a write, so the gdb server can detect a watched access. NULL (the default) adds
+// only a single predictable branch per access, and instruction fetch skips it.
+extern void (*mem_watch_hook)(uint32_t addr, int size, int is_write);
+
 // Load a flat binary file straight into system RAM at a physical address.
 // Returns 0 on success, negative on error.
 int mem_load_file(const char *filename, uint32_t phys_addr);

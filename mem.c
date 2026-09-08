@@ -145,39 +145,66 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
     // BIOS is read-only; anything else is unmapped. Ignore.
 }
 
+// Debugger watchpoint hook. NULL unless the gdb server has active watchpoints.
+void (*mem_watch_hook)(uint32_t addr, int size, int is_write) = NULL;
+
+uint32_t
+mem_fetch_word(uint32_t v_addr)
+{
+    return mem_read(v_addr, 4); // no watch hook: this is an instruction fetch
+}
+
 uint32_t
 memory_read_word(uint32_t v_addr)
 {
+    if (mem_watch_hook) {
+        mem_watch_hook(v_addr, 4, 0);
+    }
     return mem_read(v_addr, 4);
 }
 
 uint32_t
 memory_read_halfword(uint32_t v_addr)
 {
+    if (mem_watch_hook) {
+        mem_watch_hook(v_addr, 2, 0);
+    }
     return mem_read(v_addr, 2);
 }
 
 uint32_t
 memory_read_byte(uint32_t v_addr)
 {
+    if (mem_watch_hook) {
+        mem_watch_hook(v_addr, 1, 0);
+    }
     return mem_read(v_addr, 1);
 }
 
 void
 memory_write_word(uint32_t v_addr, uint32_t value)
 {
+    if (mem_watch_hook) {
+        mem_watch_hook(v_addr, 4, 1);
+    }
     mem_write(v_addr, value, 4);
 }
 
 void
 memory_write_halfword(uint32_t v_addr, uint32_t value)
 {
+    if (mem_watch_hook) {
+        mem_watch_hook(v_addr, 2, 1);
+    }
     mem_write(v_addr, value, 2);
 }
 
 void
 memory_write_byte(uint32_t v_addr, uint32_t value)
 {
+    if (mem_watch_hook) {
+        mem_watch_hook(v_addr, 1, 1);
+    }
     mem_write(v_addr, value, 1);
 }
 
