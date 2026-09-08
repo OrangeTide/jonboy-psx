@@ -146,6 +146,14 @@ int SDLCALL jonboy_runapp(int argc, char *argv[]);
 static void
 service_loader_boot(int *kernel_up, int *sideloaded)
 {
+    // Fast path out of the per-instruction cost: the body only ever acts when
+    // the CPU reaches the shell entry (to note kernel-up and run a one-time
+    // sideload) or when the guest menu has strobed a boot request. Both are
+    // rare, so skip the rest on the common step where neither holds.
+    if (cpu.PC != KERNEL_SHELL_ENTRY && !loader_boot_pending()) {
+        return;
+    }
+
     if (cpu.PC == KERNEL_SHELL_ENTRY) {
         *kernel_up = 1;
     }

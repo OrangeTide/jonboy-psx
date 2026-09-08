@@ -1,15 +1,16 @@
 BINDIR=_out
 # Optimization level is chosen per target architecture. On ARM (Raspberry Pi and
-# other Cortex targets) the interpreter and software rasterizer are the
-# bottleneck, so build optimized and tuned for the in-order Cortex-A53 pipeline.
-# Everywhere else (x86-64 dev machines) keep the debug-friendly -Og. The target
-# is read from the compiler's own triple ($(CC) -dumpmachine), so this stays
-# correct under a cross-compiler. Override by passing OPT= on the command line.
+# other Cortex targets) build optimized and tuned for the in-order Cortex-A53
+# pipeline. Everywhere else (x86-64 dev machines) build -O2: the interpreter and
+# per-instruction hardware ticks are the bottleneck, and -Og runs the core about
+# 1.4x slower, which is enough to starve real-time audio. Pass OPT= to override,
+# for example OPT=-Og for a debug build. The target is read from the compiler's
+# own triple ($(CC) -dumpmachine), so this stays correct under a cross-compiler.
 TARGET:=$(shell $(CC) -dumpmachine)
 ifneq (,$(filter aarch64% arm%,$(TARGET)))
 OPT?=-O2 -mcpu=cortex-a53 -fomit-frame-pointer
 else
-OPT?=-Og
+OPT?=-O2
 endif
 CFLAGS=-Wall -W -g $(OPT)
 all ::

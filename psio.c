@@ -300,12 +300,6 @@ loader_write(uint32_t phys_addr, uint32_t value, int size)
     }
 }
 
-int
-loader_boot_pending(void)
-{
-    return psio.boot_pending;
-}
-
 const char *
 loader_boot_path(void)
 {

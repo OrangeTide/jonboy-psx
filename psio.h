@@ -77,9 +77,16 @@ void psio_write(uint32_t phys_addr, uint32_t value, int size);
 uint32_t loader_read(uint32_t phys_addr, int size);
 void loader_write(uint32_t phys_addr, uint32_t value, int size);
 void loader_set_games_dir(const char *dir);
-int loader_boot_pending(void);
 const char *loader_boot_path(void);
 int loader_boot_is_cd(void); // true if the selected entry is a CD image
 void loader_clear_boot(void);
+
+// Hot path: the run loop tests this once per CPU step, so keep it a single
+// inline load of the flag rather than a cross-translation-unit call.
+static inline int
+loader_boot_pending(void)
+{
+    return psio.boot_pending;
+}
 
 #endif
