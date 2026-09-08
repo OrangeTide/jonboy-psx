@@ -225,6 +225,7 @@ typedef struct {
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *vram_texture; // Target texture handle for rendering
+    SDL_Texture *disp24_texture; // RGB24 unpack target for 24-bit display mode
     SDL_AudioStream *audio;    // SPU output sink (NULL if audio failed to open)
     SDL_Gamepad *gamepad;      // open analog gamepad, or NULL (keyboard only)
     bool full_vram_view;       // F1 toggles between display area and full VRAM
@@ -254,7 +255,7 @@ typedef struct {
 #define FRAME_FRESH 0x4
 static uint16_t g_frame_buf[FRAME_BUFS][VRAM_HEIGHT * VRAM_WIDTH];
 static struct {
-    int dx, dy, dw, dh, blank;
+    int dx, dy, dw, dh, blank, bpp24;
 } g_frame_meta[FRAME_BUFS];
 
 // SPU output is 44.1 kHz stereo 16-bit. The audio device pulls on demand through
@@ -306,6 +307,7 @@ publish_frame(AppContext *app)
     g_frame_meta[app->produce_idx].dw = gpu.disp_w;
     g_frame_meta[app->produce_idx].dh = gpu.disp_h;
     g_frame_meta[app->produce_idx].blank = gpu.disp_blank;
+    g_frame_meta[app->produce_idx].bpp24 = gpu.disp_24bpp;
 
     // SDL_SetAtomicInt is an atomic exchange with a full memory barrier, so the
     // buffer writes above are visible to the main thread once it reads the fresh
@@ -343,18 +345,48 @@ present_frame(AppContext *app)
             SDL_UnlockTexture(app->vram_texture);
         }
 
+        int dx = g_frame_meta[app->consume_idx].dx;
+        int dy = g_frame_meta[app->consume_idx].dy;
+        int dw = g_frame_meta[app->consume_idx].dw;
+        int dh = g_frame_meta[app->consume_idx].dh;
+
         if (app->full_vram_view) {
             // Debug view: the entire 1024x512 VRAM stretched to the window.
             SDL_RenderTexture(app->renderer, app->vram_texture, NULL, NULL);
-        } else if (!g_frame_meta[app->consume_idx].blank) {
-            // Normal view: only the GPU's display area, as a TV would. A disabled
-            // display leaves the window cleared (black).
-            SDL_FRect src = {
-                (float)g_frame_meta[app->consume_idx].dx,
-                (float)g_frame_meta[app->consume_idx].dy,
-                (float)g_frame_meta[app->consume_idx].dw,
-                (float)g_frame_meta[app->consume_idx].dh
-            };
+        } else if (g_frame_meta[app->consume_idx].blank) {
+            // A disabled display leaves the window cleared (black).
+        } else if (g_frame_meta[app->consume_idx].bpp24) {
+            // 24-bit display mode: unpack the display area's packed 24-bit RGB
+            // (three bytes per pixel, spanning the 16-bit VRAM words) into the
+            // RGB24 texture, then present it. The horizontal origin dx is in
+            // VRAM columns; each output pixel reads three consecutive bytes.
+            void *pixels;
+            int pitch;
+            if (dw > VRAM_WIDTH) dw = VRAM_WIDTH;
+            if (dh > VRAM_HEIGHT) dh = VRAM_HEIGHT;
+            SDL_Rect area = { 0, 0, dw, dh };
+            if (SDL_LockTexture(app->disp24_texture, &area, &pixels, &pitch)) {
+                const uint16_t *src = g_frame_buf[app->consume_idx];
+                for (int y = 0; y < dh; y++) {
+                    const uint16_t *row = &src[(size_t)((dy + y) & 0x1FF) * VRAM_WIDTH];
+                    uint8_t *out = (uint8_t *)pixels + (size_t)y * pitch;
+                    for (int x = 0; x < dw; x++) {
+                        int b0 = dx * 2 + x * 3;
+                        uint16_t w0 = row[(b0 >> 1) & 0x3FF];
+                        uint16_t w1 = row[((b0 + 1) >> 1) & 0x3FF];
+                        uint16_t w2 = row[((b0 + 2) >> 1) & 0x3FF];
+                        out[x * 3 + 0] = (b0 & 1) ? (w0 >> 8) : (w0 & 0xFF);
+                        out[x * 3 + 1] = ((b0 + 1) & 1) ? (w1 >> 8) : (w1 & 0xFF);
+                        out[x * 3 + 2] = ((b0 + 2) & 1) ? (w2 >> 8) : (w2 & 0xFF);
+                    }
+                }
+                SDL_UnlockTexture(app->disp24_texture);
+            }
+            SDL_FRect src = { 0.0f, 0.0f, (float)dw, (float)dh };
+            SDL_RenderTexture(app->renderer, app->disp24_texture, &src, NULL);
+        } else {
+            // Normal view: only the GPU's display area, as a TV would.
+            SDL_FRect src = { (float)dx, (float)dy, (float)dw, (float)dh };
             SDL_RenderTexture(app->renderer, app->vram_texture, &src, NULL);
         }
     }
@@ -453,6 +485,23 @@ jonboy_runapp(int argc, char *argv[])
 
     if (!app.vram_texture) {
         SDL_Log("Failed to create VRAM texture: %s", SDL_GetError());
+        SDL_DestroyRenderer(app.renderer);
+        SDL_DestroyWindow(app.window);
+        SDL_Quit();
+        return 1;
+    }
+
+    // A second target for 24-bit display mode (full-motion video). VRAM holds
+    // packed 24-bit RGB there, which the 15-bit texture above cannot represent,
+    // so present_frame unpacks the display area into this one instead. Sized to
+    // the widest display area a 24-bit frame can occupy.
+    app.disp24_texture = SDL_CreateTexture(app.renderer, SDL_PIXELFORMAT_RGB24,
+                                           SDL_TEXTUREACCESS_STREAMING,
+                                           VRAM_WIDTH, VRAM_HEIGHT);
+
+    if (!app.disp24_texture) {
+        SDL_Log("Failed to create 24-bit display texture: %s", SDL_GetError());
+        SDL_DestroyTexture(app.vram_texture);
         SDL_DestroyRenderer(app.renderer);
         SDL_DestroyWindow(app.window);
         SDL_Quit();
@@ -610,6 +659,7 @@ jonboy_runapp(int argc, char *argv[])
         SDL_DestroyAudioStream(app.audio);
     }
     SDL_DestroyTexture(app.vram_texture);
+    SDL_DestroyTexture(app.disp24_texture);
     SDL_DestroyRenderer(app.renderer);
     SDL_DestroyWindow(app.window);
     SDL_Quit();
@@ -732,9 +782,11 @@ bgr555_to_rgb(uint16_t px, int *r, int *g, int *b)
     *b = (b5 << 3) | (b5 >> 2);
 }
 
-// Dump the visible 320x240 top-left region of VRAM as a binary PPM. Setting the
-// VRAMFULL environment variable dumps the entire 1024x512 VRAM instead, which is
-// needed to inspect off-screen texture pages such as the shell flame at (896,0).
+// Dump the visible 320x240 display area of VRAM as a binary PPM, decoded from
+// the GPU's display origin and honouring 24-bit colour mode (used by full-motion
+// video). Setting the VRAMFULL environment variable dumps the entire 1024x512
+// VRAM as raw 15-bit instead, which is needed to inspect off-screen texture
+// pages such as the shell flame at (896,0).
 static void
 dump_vram_ppm(const char *path)
 {
@@ -750,11 +802,34 @@ dump_vram_ppm(const char *path)
     int h = full ? VRAM_HEIGHT : 240;
     fprintf(f, "P6\n%d %d\n255\n", w, h);
 
+    int ox = full ? 0 : gpu.disp_x;
+    int oy = full ? 0 : gpu.disp_y;
+
     for (int y = 0; y < h; y++) {
+        int row = (oy + y) & 0x1FF;
         for (int x = 0; x < w; x++) {
-            int r, g, b;
-            bgr555_to_rgb(vram.canvas[x][y], &r, &g, &b);
-            unsigned char rgb[3] = { (unsigned char)r, (unsigned char)g, (unsigned char)b };
+            unsigned char rgb[3];
+            if (!full && gpu.disp_24bpp) {
+                // 24-bit display: three packed bytes per pixel across the
+                // 16-bit VRAM words. The horizontal origin is in VRAM columns.
+                int b0 = ox * 2 + x * 3;
+                int c0 = (b0 >> 1) & 0x3FF;
+                int c1 = ((b0 + 1) >> 1) & 0x3FF;
+                int c2 = ((b0 + 2) >> 1) & 0x3FF;
+                uint16_t w0 = vram.canvas[c0][row];
+                uint16_t w1 = vram.canvas[c1][row];
+                uint16_t w2 = vram.canvas[c2][row];
+                rgb[0] = (b0 & 1) ? (w0 >> 8) : (w0 & 0xFF);
+                rgb[1] = ((b0 + 1) & 1) ? (w1 >> 8) : (w1 & 0xFF);
+                rgb[2] = ((b0 + 2) & 1) ? (w2 >> 8) : (w2 & 0xFF);
+            } else {
+                int r, g, b;
+                int col = full ? x : (ox + x) & 0x3FF;
+                bgr555_to_rgb(vram.canvas[col][row], &r, &g, &b);
+                rgb[0] = (unsigned char)r;
+                rgb[1] = (unsigned char)g;
+                rgb[2] = (unsigned char)b;
+            }
             fwrite(rgb, 1, 3, f);
         }
     }
