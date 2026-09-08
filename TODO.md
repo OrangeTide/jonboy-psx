@@ -255,11 +255,17 @@ Next up (in order):
   YCbCr-to-RGB conversion. `run_boot` prints an MDEC decode-command and
   macroblock tally (`mdec_get_stats`) so an FMV run shows a rising colour count.
 - Still pending: a real game FMV through the whole pipeline (CD stream to MDEC to
-  GPU). Attempts with FF Tactics, Chrono Trigger, and Lunar all boot into game
-  code but stall in early wait loops with a black framebuffer and zero MDEC
-  decodes, so the FMV data never starts flowing. This is the general
-  game-boot-progression limitation (FFT's documented ~0x8001DD18 poll loop), not
-  an MDEC gap, and unblocking it is separate work.
+  GPU). Lunar Silver Star Story now boots past its old timer stall (see the timer
+  clock-source fix), renders the copyright screen, and streams its intro FMV off
+  the CD: the drive delivers the STR video sectors as INT1 and routes the
+  interleaved XA audio to the SPU (mode 0xC0, ReadS from LBA 36748). The game's CD
+  interrupt handler acks every sector, but its main loop stays parked at PC
+  0x80093CA8 waiting on a decode-queue state field to reach 2 and never issues an
+  MDEC command, so no frame is decoded. The CD path and timers are correct here;
+  the remaining blocker is in the game's own FMV decode-trigger state machine and
+  needs per-game tracing (watchpoint on the queue entry the loop polls). FF
+  Tactics and Chrono Trigger stall earlier still (FFT at its documented
+  ~0x8001DD18 poll loop).
 - The status "current block" field (bits 16-18) is left at its idle value rather
   than advancing per block during a decode; games generally use DMA rather than
   polling it.
