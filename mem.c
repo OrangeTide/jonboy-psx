@@ -148,10 +148,22 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
 // Debugger watchpoint hook. NULL unless the gdb server has active watchpoints.
 void (*mem_watch_hook)(uint32_t addr, int size, int is_write) = NULL;
 
+// Fast path for the common case: an aligned word in main RAM. Instruction
+// fetches and most loads/stores land here, so skip the mem_read/mem_write call
+// and its region chain and go straight to the backing array. The bounds and
+// mirror mask match the RAM case in mem_read/mem_write; anything else falls
+// through to the full decoder. RAM has no MMIO side effects, so nothing else is
+// needed. (RAM_END and RAM_MASK are kept in sync with mem_read by hand.)
 uint32_t
 mem_fetch_word(uint32_t v_addr)
 {
-    return mem_read(v_addr, 4); // no watch hook: this is an instruction fetch
+    uint32_t a = TO_PHYSICAL(v_addr); // no watch hook: this is an instruction fetch
+
+    if (a < RAM_END) {
+        return load_sized(system_ram, a & RAM_MASK, 4);
+    }
+
+    return mem_read(v_addr, 4);
 }
 
 uint32_t
@@ -160,6 +172,13 @@ memory_read_word(uint32_t v_addr)
     if (mem_watch_hook) {
         mem_watch_hook(v_addr, 4, 0);
     }
+
+    uint32_t a = TO_PHYSICAL(v_addr);
+
+    if (a < RAM_END) {
+        return load_sized(system_ram, a & RAM_MASK, 4);
+    }
+
     return mem_read(v_addr, 4);
 }
 
@@ -187,6 +206,14 @@ memory_write_word(uint32_t v_addr, uint32_t value)
     if (mem_watch_hook) {
         mem_watch_hook(v_addr, 4, 1);
     }
+
+    uint32_t a = TO_PHYSICAL(v_addr);
+
+    if (a < RAM_END) {
+        store_sized(system_ram, a & RAM_MASK, value, 4);
+        return;
+    }
+
     mem_write(v_addr, value, 4);
 }
 
