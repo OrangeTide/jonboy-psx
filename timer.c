@@ -125,3 +125,31 @@ psx_timers_tick(uint32_t cycles)
         }
     }
 }
+
+uint32_t
+timer_next_event(void)
+{
+    // The nearest cycle at which any counter reaches its target or wraps past
+    // 0xFFFF. A counter is always at most one wrap (0x10000 cycles) away, so the
+    // returned value bounds every batched tick to a single crossing, which keeps
+    // psx_timers_tick's one-crossing logic and the observable counter exact.
+    uint32_t best = 0x10000;
+
+    for (int i = 0; i < 3; i++) {
+        PsxTimer *t = &timers[i];
+        uint32_t d = 0x10000 - t->counter; // cycles to wrap
+
+        if (t->target != 0 && t->counter < t->target) {
+            uint32_t dt = t->target - t->counter;
+            if (dt < d) {
+                d = dt;
+            }
+        }
+
+        if (d < best) {
+            best = d;
+        }
+    }
+
+    return best ? best : 1;
+}

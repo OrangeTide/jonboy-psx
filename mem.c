@@ -9,6 +9,7 @@
 #include "spu.h"
 #include "cdrom.h"
 #include "timer.h"
+#include "sched.h"
 #include "lebytes.h"
 
 #include <stdio.h>
@@ -67,6 +68,10 @@ mem_read(uint32_t v_addr, int size)
         return loader_read(a, size);
     }
 
+    // Everything below is a timing device (SPU, CD-ROM, pad, or the MMIO block).
+    // Bring the hardware clock current so the register reads the right time.
+    psx_hardware_sync();
+
     if (a >= SPU_BASE && a < SPU_BASE + SPU_SIZE) {
         return psx_spu_read(a, size);
     }
@@ -121,6 +126,11 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
         loader_write(a, value, size);
         return;
     }
+
+    // Everything below is a timing device (SPU, CD-ROM, pad, or the MMIO block).
+    // Sync first so the device sees the right time; psx_hardware_sync then folds
+    // any event this write arms into the scheduler's next deadline.
+    psx_hardware_sync();
 
     if (a >= SPU_BASE && a < SPU_BASE + SPU_SIZE) {
         psx_spu_write(a, value, size);

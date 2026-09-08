@@ -102,6 +102,12 @@ psx_pad_tick(uint32_t cycles)
     }
 }
 
+uint32_t
+pad_next_event(void)
+{
+    return sio.ack_delay > 0 ? (uint32_t)sio.ack_delay : UINT32_MAX;
+}
+
 void
 psx_pad_reset(void)
 {

@@ -16,4 +16,9 @@ void psx_timer_set_target(int timer_index, uint32_t value);
 void psx_timers_tick(uint32_t cycles);
 void psx_timers_reset(void);
 
+// Cycles until a counter next reaches its target or wraps, so the scheduler can
+// batch cycles up to that point instead of ticking every step. Always finite
+// (at most one wrap away), so a batched tick crosses each boundary only once.
+uint32_t timer_next_event(void);
+
 #endif

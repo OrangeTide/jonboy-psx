@@ -8,6 +8,8 @@
 #include "pad.h"
 #include "script.h"
 
+#include <stdint.h>
+
 // Approximate NTSC timing: the ~33.87 MHz CPU clock over 60 Hz is about
 // 564480 cycles per frame. VBLANK is raised once per frame.
 #define FRAME_CYCLES 564480
@@ -15,20 +17,28 @@
 static uint32_t vblank_acc;
 static uint32_t frame_count; // video frames since reset, the script's clock
 
-void
-psx_hardware_reset(void)
-{
-    vblank_acc = 0;
-    frame_count = 0;
-    psx_timers_reset();
-    psx_spu_reset();
-    psx_gpu_reset();
-    psx_cdrom_reset();
-    psx_pad_reset();
-}
+// Cycle scheduler. Ticking every device on every CPU step is pure overhead when
+// nothing is due, so instead the clock free-runs and the device fan-out only
+// happens at the next scheduled event or when a device register is touched.
+//
+//   hw_cycle    the running CPU clock (advanced every step)
+//   hw_synced   how far the devices have actually been ticked
+//   hw_deadline the cycle at which the next event must be applied
+//
+// Between hw_synced and hw_cycle no device can raise an interrupt or change an
+// observable value, because hw_deadline is the nearest such moment across every
+// subsystem and the bus syncs before touching any device. So the flush applies
+// exactly the elapsed cycles in one batched tick, reproducing the same
+// interrupts at the same cycles as ticking two at a time would.
+static uint64_t hw_cycle;
+static uint64_t hw_synced;
+static uint64_t hw_deadline;
 
-void
-psx_hardware_tick(uint32_t cycles)
+// The old per-step tick body: advance the frame clock and every device by a
+// batch of cycles. The batch is bounded to the nearest deadline, so each device
+// crosses at most one of its own boundaries per call.
+static void
+hw_apply(uint32_t cycles)
 {
     vblank_acc += cycles;
 
@@ -45,4 +55,87 @@ psx_hardware_tick(uint32_t cycles)
     psx_dma_tick(cycles);
     psx_spu_tick(cycles);
     psx_pad_tick(cycles);
+}
+
+// Cycles from now until the nearest event across all subsystems. Always finite
+// and at least one: VBLANK and the timers are always counting, so this bounds
+// every batch to a single crossing.
+static uint32_t
+hw_next_event(void)
+{
+    uint32_t d = FRAME_CYCLES - vblank_acc; // cycles to the next VBLANK
+    uint32_t e;
+
+    e = timer_next_event();
+    if (e < d) {
+        d = e;
+    }
+    e = cdrom_next_event();
+    if (e < d) {
+        d = e;
+    }
+    e = dma_next_event();
+    if (e < d) {
+        d = e;
+    }
+    e = pad_next_event();
+    if (e < d) {
+        d = e;
+    }
+    e = spu_next_event();
+    if (e < d) {
+        d = e;
+    }
+
+    return d ? d : 1;
+}
+
+// Apply the cycles that have elapsed since the last sync as one batched tick,
+// then set the next deadline from the devices' current state.
+static void
+hw_flush(void)
+{
+    uint32_t delta = (uint32_t)(hw_cycle - hw_synced);
+
+    if (delta) {
+        hw_apply(delta);
+        hw_synced = hw_cycle;
+    }
+
+    hw_deadline = hw_cycle + hw_next_event();
+}
+
+void
+psx_hardware_advance(uint32_t cycles)
+{
+    hw_cycle += cycles;
+    if (hw_cycle >= hw_deadline) {
+        hw_flush();
+    }
+}
+
+void
+psx_hardware_sync(void)
+{
+    // Make the devices current for a register access. Force the next step to
+    // flush again so that a write which arms a new event (a DMA completion, a
+    // pad acknowledge, a fresh timer target) is folded into the deadline before
+    // any more cycles pass.
+    hw_flush();
+    hw_deadline = hw_cycle;
+}
+
+void
+psx_hardware_reset(void)
+{
+    vblank_acc = 0;
+    frame_count = 0;
+    hw_cycle = 0;
+    hw_synced = 0;
+    hw_deadline = 0; // first advance flushes and computes the real deadline
+    psx_timers_reset();
+    psx_spu_reset();
+    psx_gpu_reset();
+    psx_cdrom_reset();
+    psx_pad_reset();
 }

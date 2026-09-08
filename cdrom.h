@@ -31,4 +31,8 @@ void cdrom_io_stop(void);
 // Pull `words` 32-bit words of the current sector into RAM for DMA channel 3.
 void cdrom_dma_read(uint32_t madr, uint32_t words);
 
+// Cycles until the drive's next timed action (command response, sector read, or
+// audio sector), or UINT32_MAX when the drive has nothing pending.
+uint32_t cdrom_next_event(void);
+
 #endif

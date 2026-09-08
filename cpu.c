@@ -158,8 +158,9 @@ void
 step_cpu(void)
 {
     // Advance hardware time first so a VBLANK or timer interrupt raised this
-    // step is recognized at the boundary check just below.
-    psx_hardware_tick(CPU_CYCLES_PER_STEP);
+    // step is recognized at the boundary check just below. The scheduler only
+    // runs the device fan-out when an event is due, not on every step.
+    psx_hardware_advance(CPU_CYCLES_PER_STEP);
 
     // ---- RECOGNIZE PENDING INTERRUPTS ----
     // Interrupts are taken at instruction boundaries, before fetching the next

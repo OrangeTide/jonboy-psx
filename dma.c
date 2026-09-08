@@ -223,6 +223,12 @@ psx_dma_tick(uint32_t cycles)
     }
 }
 
+uint32_t
+dma_next_event(void)
+{
+    return dma_irq_delay > 0 ? (uint32_t)dma_irq_delay : UINT32_MAX;
+}
+
 // Shared completion path: clear the channel's start bit and, if the channel's
 // DMA interrupt is enabled, raise its flag and signal the CPU.
 static void

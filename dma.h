@@ -14,4 +14,8 @@ extern uint32_t dma_interrupt; // Global DMA Interrupt Register (0x1F8010F4)
 
 void psx_dma_tick(uint32_t cycles);
 void run_dma_transfer(int channel);
+
+// Cycles until a deferred DMA completion interrupt is due, or UINT32_MAX when
+// none is pending.
+uint32_t dma_next_event(void);
 #endif

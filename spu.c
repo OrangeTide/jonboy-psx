@@ -718,6 +718,20 @@ psx_spu_tick(uint32_t cycles)
 }
 
 uint32_t
+spu_next_event(void)
+{
+    // A sample is mixed every SPU_CYCLES_PER_SAMPLE cycles. Mixing can raise the
+    // sound-RAM IRQ, so while IRQ9 is armed the scheduler must stop at each
+    // sample boundary to catch it at the right cycle. With IRQ9 off the mixer
+    // raises nothing, so batching many samples at once is exact and the SPU
+    // needs no deadline.
+    if (!(load_sized(spu_regs, SPUCNT_OFFSET, 2) & 0x0040)) {
+        return UINT32_MAX;
+    }
+    return SPU_CYCLES_PER_SAMPLE - spu_cycle_acc;
+}
+
+uint32_t
 psx_spu_read(uint32_t phys_addr, int size)
 {
     uint32_t off = phys_addr - SPU_BASE;

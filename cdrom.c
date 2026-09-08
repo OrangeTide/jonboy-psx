@@ -1097,6 +1097,29 @@ psx_cdrom_tick(uint32_t cycles)
     }
 }
 
+uint32_t
+cdrom_next_event(void)
+{
+    // Mirror the conditions in psx_cdrom_tick: report the nearest active
+    // countdown so the scheduler stops exactly when the drive next needs
+    // servicing. The sector and audio pumps only advance once the command queue
+    // has drained, matching the tick.
+    uint32_t best = UINT32_MAX;
+    int idle = cd.irq_flags == 0 && cd.queue_count == 0;
+
+    if (cd.deliver_delay > 0 && (uint32_t)cd.deliver_delay < best) {
+        best = (uint32_t)cd.deliver_delay;
+    }
+    if (cd.reading && idle && cd.read_delay > 0 && (uint32_t)cd.read_delay < best) {
+        best = (uint32_t)cd.read_delay;
+    }
+    if (cd.playing && idle && cd.play_delay > 0 && (uint32_t)cd.play_delay < best) {
+        best = (uint32_t)cd.play_delay;
+    }
+
+    return best;
+}
+
 void
 cdrom_dma_read(uint32_t madr, uint32_t words)
 {

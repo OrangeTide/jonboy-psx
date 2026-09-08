@@ -50,4 +50,8 @@ void psx_pad_write(uint32_t phys_addr, uint32_t value, int size);
 void psx_pad_tick(uint32_t cycles);
 void psx_pad_reset(void);
 
+// Cycles until the SIO0 acknowledge pulse raises its interrupt, or UINT32_MAX
+// when no transfer acknowledge is pending.
+uint32_t pad_next_event(void);
+
 #endif

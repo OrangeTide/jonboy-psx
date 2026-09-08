@@ -31,4 +31,9 @@ void spu_cd_audio(const int16_t *frames, int nframes);
 // hands the frames to the sound device.
 int spu_output_pull(int16_t *dst, int max_frames);
 
+// Cycles until the next output sample, but only while the sound-RAM IRQ is
+// armed (it can fire mid-mix). Returns UINT32_MAX otherwise, so the scheduler
+// batches freely when no SPU interrupt can be raised.
+uint32_t spu_next_event(void);
+
 #endif
