@@ -1,12 +1,19 @@
 #include "pad.h"
 #include "cpu.h"
+#include "mc.h"
 
-// SIO0 (controller / memory-card port) with a single digital pad in slot 1.
-// The BIOS/game addresses the pad by asserting select, then clocking a command
-// through the transmit register one byte at a time. The pad replies a byte per
-// clock and pulses its acknowledge line after every byte but the last, which we
-// model as the SIO0 interrupt (IRQ_PAD). Slot 2 and the memory-card address
-// (0x81) report no device, so those probes time out.
+// SIO0 (controller / memory-card port) in slot 1. The BIOS/game addresses a
+// device by asserting select, then clocking a command through the transmit
+// register one byte at a time. The addressed device replies a byte per clock and
+// pulses its acknowledge line after every byte but the last, which we model as
+// the SIO0 interrupt (IRQ_PAD). The first byte selects the device: 0x01 the
+// digital pad, 0x81 the memory card (when one is mounted). Slot 2 reports no
+// device, so those probes time out.
+
+// The device answering the current transaction.
+#define DEV_NONE 0
+#define DEV_PAD  1
+#define DEV_CARD 2
 
 // JOY_STAT bits.
 #define STAT_TX_READY_1  0x01 // ready to accept a byte in the transmit register
@@ -34,7 +41,7 @@ static struct {
     int rx_ready;     // a received byte is waiting to be read
     int irq;          // acknowledge interrupt latched (JOY_STAT bit9)
     int xfer_pos;     // byte index within the current transaction
-    int dev_active;   // a pad is responding to the current transaction
+    int device;       // which device is answering (DEV_*)
     uint16_t mode;
     uint16_t ctrl;
     uint16_t baud;
@@ -47,30 +54,24 @@ psx_pad_reset(void)
     sio.rx_ready = 0;
     sio.irq = 0;
     sio.xfer_pos = 0;
-    sio.dev_active = 0;
+    sio.device = DEV_NONE;
     sio.mode = 0;
     sio.ctrl = 0;
     sio.baud = 0;
 }
 
-// Compute the byte the pad shifts back for the current transaction position and
-// say (via *ack) whether the pad pulses acknowledge after it.
+// Compute the byte the digital pad shifts back for transaction position `pos`
+// and say (via *ack) whether it pulses acknowledge after it.
 static uint8_t
-pad_response(uint8_t cmd, int *ack)
+pad_response(int pos, uint8_t cmd, int *ack)
 {
+    (void)cmd;
     *ack = 0;
 
-    switch (sio.xfer_pos) {
+    switch (pos) {
     case 0:
-        // First byte addresses a device: 0x01 selects the controller. Anything
-        // else (e.g. 0x81 for a memory card) leaves the slot silent.
-        if (cmd == 0x01) {
-            sio.dev_active = 1;
-            *ack = 1;
-            return 0xFF;
-        }
-        sio.dev_active = 0;
-        return 0xFF;
+        *ack = 1;
+        return 0xFF; // addressed (0x01): presence acknowledge
 
     case 1:
         *ack = 1;
@@ -142,7 +143,7 @@ psx_pad_write(uint32_t phys_addr, uint32_t value, int size)
 
     switch (reg) {
     case REG_DATA: {
-        // A byte was clocked out. A pad answers only when slot 1 is selected;
+        // A byte was clocked out. A device answers only when slot 1 is selected;
         // otherwise the line floats to 0xFF and nothing acknowledges.
         int selected = (sio.ctrl & CTRL_SELECT) && !(sio.ctrl & CTRL_PORT2);
 
@@ -152,14 +153,36 @@ psx_pad_write(uint32_t phys_addr, uint32_t value, int size)
             break;
         }
 
+        // The first byte of a transaction selects the device.
+        if (sio.xfer_pos == 0) {
+            if ((uint8_t)value == 0x01) {
+                sio.device = DEV_PAD;
+            } else if ((uint8_t)value == 0x81 && mc_present()) {
+                sio.device = DEV_CARD;
+            } else {
+                sio.device = DEV_NONE;
+            }
+        }
+
         int ack = 0;
-        sio.rx_data = pad_response((uint8_t)value, &ack);
+        switch (sio.device) {
+        case DEV_PAD:
+            sio.rx_data = pad_response(sio.xfer_pos, (uint8_t)value, &ack);
+            break;
+        case DEV_CARD:
+            sio.rx_data = mc_transfer(sio.xfer_pos, (uint8_t)value, &ack);
+            break;
+        default:
+            sio.rx_data = 0xFF;
+            ack = 0;
+            break;
+        }
         sio.rx_ready = 1;
         sio.xfer_pos++;
 
-        if (ack && sio.dev_active) {
+        if (ack) {
             sio.irq = 1;
-            cpu.i_stat |= (1u << IRQ_PAD); // pad acknowledge -> SIO0 interrupt
+            cpu.i_stat |= (1u << IRQ_PAD); // device acknowledge -> SIO0 interrupt
         }
         break;
     }
@@ -181,7 +204,7 @@ psx_pad_write(uint32_t phys_addr, uint32_t value, int size)
         if ((value & CTRL_RESET) ||
             ((value & CTRL_SELECT) && !(prev & CTRL_SELECT))) {
             sio.xfer_pos = 0;
-            sio.dev_active = 0;
+            sio.device = DEV_NONE;
             sio.rx_ready = 0;
         }
         break;

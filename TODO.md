@@ -26,10 +26,18 @@ card address report no device.
       | Byte 5 | 0x00 | DATA 2 | Scan Code Byte 1 (The active key being pressed / held). |
       | Byte 6 | 0x00 | DATA 3 | Scan Code Byte 2 (If multiple keys are held simultaneously). |
 
-- [ ] memory card support. The card is addressed by a leading 0x81 select byte
-  (controllers use 0x01), then a command selects read (0x52), write (0x57), or
-  get-id (0x53). The BIOS shell already has a MEMORY CARD menu, so this is needed
-  for the shell to manage saves. Back it with a 128 KB card image file.
+- [x] memory card support (slot 1). mc.c backs a raw 128 KB image (the common
+  .mcr/.mcd format shared by emulators and hardware card readers): 1024 frames of
+  128 bytes, frame 0 the directory header. pad.c routes the SIO0 transaction by
+  its first byte, 0x01 to the digital pad and 0x81 to the card. The card answers
+  read (0x52) and write (0x57): ID bytes 0x5A/0x5D, command acknowledge 0x5C/0x5D,
+  the 128-byte frame, the checksum (XOR of the address and data bytes), and the
+  end byte (0x47 good, 0x4E bad checksum). The FLAG byte reports directory-unread
+  (0x08) until the first read or write. Mount with --memcard <file>; a missing
+  file is created as a freshly formatted card, and writes persist per frame to it.
+  Unit tested (test_mc.c, `make mc-test`: read, write, persistence, bad-checksum
+  rejection, and the FLAG transition). Not done yet: get-id (0x53), the
+  PocketStation extensions, and slot 2.
 
 ## Audio
 

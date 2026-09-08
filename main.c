@@ -16,6 +16,7 @@
 #include "rom.h"
 #include "cdrom.h"
 #include "spu.h"
+#include "mc.h"
 
 // Map a host key to a digital pad button bit, or 0 if it is not a pad key.
 static uint16_t
@@ -47,6 +48,7 @@ static const char *g_bios_path = "bios.bin"; // BIOS image to load
 static const char *g_sideload_exe = NULL;    // PS-EXE to run atop the booted kernel
 static const char *g_games_dir = NULL;       // directory the loader menu browses
 static const char *g_cd_path = NULL;         // disc image to mount (.bin/.cue)
+static const char *g_memcard_path = NULL;    // memory-card image (raw 128 KB)
 
 #define TARGET_FPS 60
 
@@ -213,6 +215,10 @@ jonboy_runapp(int argc, char *argv[])
     if (g_psio_boot) {
         inject_boot_stub(bios_rom);
         printf("PSIO boot stub injected.\n");
+    }
+
+    if (g_memcard_path && mc_mount(g_memcard_path) == 0) {
+        printf("Memory card %s\n", g_memcard_path);
     }
 
     // Start execution at the CPU reset vector (BIOS entry point).
@@ -558,6 +564,10 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
         }
     }
 
+    if (g_memcard_path && mc_mount(g_memcard_path) == 0) {
+        printf("Memory card %s\n", g_memcard_path);
+    }
+
     cpu_reset(0xBFC00000);
     // A sideloaded program runs with a live BIOS, so BREAK must vector to the
     // handler (some tests rely on it) rather than stopping the harness.
@@ -650,6 +660,7 @@ print_usage(const char *prog)
             "  --firmware <file>   load a PSIO firmware ROM image\n"
             "  --games <dir>       directory the loader menu browses for images\n"
             "  --cd <file>         mount a disc image (.bin or .cue)\n"
+            "  --memcard <file>    memory card image (raw 128 KB; created if absent)\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
             "  --pc <hex>          entry PC (default = load address)\n"
@@ -691,6 +702,8 @@ main(int argc, char *argv[])
             g_games_dir = argv[++i];
         } else if (strcmp(argv[i], "--cd") == 0 && i + 1 < argc) {
             g_cd_path = argv[++i];
+        } else if (strcmp(argv[i], "--memcard") == 0 && i + 1 < argc) {
+            g_memcard_path = argv[++i];
         } else if (strcmp(argv[i], "--bios") == 0 && i + 1 < argc) {
             g_bios_path = argv[++i];
         } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
