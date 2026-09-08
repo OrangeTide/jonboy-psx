@@ -35,9 +35,10 @@ card address report no device.
   end byte (0x47 good, 0x4E bad checksum). The FLAG byte reports directory-unread
   (0x08) until the first read or write. Mount with --memcard <file>; a missing
   file is created as a freshly formatted card, and writes persist per frame to it.
+  Get ID (0x53) returns the ID, acknowledge, and geometry bytes (04 00 00 80).
   Unit tested (test_mc.c, `make mc-test`: read, write, persistence, bad-checksum
-  rejection, and the FLAG transition). Not done yet: get-id (0x53), the
-  PocketStation extensions, and slot 2.
+  rejection, get-id, and the FLAG transition). Not done yet: the PocketStation
+  extensions and slot 2.
 
 ## Audio
 

@@ -142,6 +142,23 @@ main(void)
     check("persisted end byte", do_read(16, back), 0x47);
     check("persisted matches", memcmp(pattern, back, 128) == 0, 1);
 
+    // Get ID (0x53) returns the ID, acknowledge, and geometry bytes.
+    {
+        uint8_t send[10] = { 0 };
+        uint8_t recv[10] = { 0 };
+        send[0] = 0x81;
+        send[1] = 0x53;
+        run(send, recv, 10);
+        check("id ID1", recv[2], 0x5A);
+        check("id ID2", recv[3], 0x5D);
+        check("id ack1", recv[4], 0x5C);
+        check("id ack2", recv[5], 0x5D);
+        check("id byte 0", recv[6], 0x04);
+        check("id byte 1", recv[7], 0x00);
+        check("id byte 2", recv[8], 0x00);
+        check("id byte 3", recv[9], 0x80);
+    }
+
     // A write with a bad checksum is rejected and leaves the frame unchanged.
     uint8_t other[128];
     memset(other, 0xEE, sizeof other);

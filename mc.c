@@ -216,6 +216,32 @@ write_command(int pos, uint8_t value, int *ack)
     }
 }
 
+// Get ID (0x53): after the ID and acknowledge bytes, the card returns four
+// bytes describing its geometry, 04 00 00 80 for a standard card (0x0400 = 1024
+// frames, 0x0080 = 128 bytes per frame).
+static uint8_t
+id_command(int pos, int *ack)
+{
+    switch (pos) {
+    case 4:
+        return RESP_ACK1;
+    case 5:
+        return RESP_ACK2;
+    case 6:
+        return 0x04;
+    case 7:
+        return 0x00;
+    case 8:
+        return 0x00;
+    case 9:
+        *ack = 0; // last byte: no acknowledge
+        return 0x80;
+    default:
+        *ack = 0;
+        return RESP_IDLE;
+    }
+}
+
 uint8_t
 mc_transfer(int pos, uint8_t value, int *ack)
 {
@@ -244,6 +270,9 @@ mc_transfer(int pos, uint8_t value, int *ack)
     }
     if (mc.cmd == 0x57) {
         return write_command(pos, value, ack);
+    }
+    if (mc.cmd == 0x53) {
+        return id_command(pos, ack);
     }
 
     *ack = 0;
