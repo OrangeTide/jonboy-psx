@@ -2,6 +2,7 @@
 #include "cpu.h"
 #include "dma.h"
 #include "gpu.h"
+#include "mdec.h"
 #include "mem.h"
 #include "mmio.h"
 #include "pad.h"
@@ -140,6 +141,7 @@ mem_write(uint32_t v_addr, uint32_t value, int size)
     } else if (a >= MMIO_BASE && a < (MMIO_BASE + MMIO_LENGTH)) {
         write_hardware_word(a & ~3u, value);
     }
+
     // BIOS is read-only; anything else is unmapped and ignored.
 
     psx_hardware_resched();
@@ -188,6 +190,7 @@ memory_read_halfword(uint32_t v_addr)
     if (mem_watch_hook) {
         mem_watch_hook(v_addr, 2, 0);
     }
+
     return mem_read(v_addr, 2);
 }
 
@@ -197,6 +200,7 @@ memory_read_byte(uint32_t v_addr)
     if (mem_watch_hook) {
         mem_watch_hook(v_addr, 1, 0);
     }
+
     return mem_read(v_addr, 1);
 }
 
@@ -223,6 +227,7 @@ memory_write_halfword(uint32_t v_addr, uint32_t value)
     if (mem_watch_hook) {
         mem_watch_hook(v_addr, 2, 1);
     }
+
     mem_write(v_addr, value, 2);
 }
 
@@ -232,6 +237,7 @@ memory_write_byte(uint32_t v_addr, uint32_t value)
     if (mem_watch_hook) {
         mem_watch_hook(v_addr, 1, 1);
     }
+
     mem_write(v_addr, value, 1);
 }
 
@@ -385,9 +391,14 @@ read_hardware_word(uint32_t physical_addr)
         int timer = (offset - 0x1100) / 0x10;
 
         switch (offset & 0xF) {
-        case 0x0: return psx_timer_get_value(timer);
-        case 0x4: return psx_timer_get_mode(timer);
-        case 0x8: return psx_timer_get_target(timer);
+        case 0x0:
+            return psx_timer_get_value(timer);
+
+        case 0x4:
+            return psx_timer_get_mode(timer);
+
+        case 0x8:
+            return psx_timer_get_target(timer);
         }
     }
 
@@ -413,6 +424,11 @@ read_hardware_word(uint32_t physical_addr)
 
     case 0x1814:
         return psx_gpu_get_status(); // Vital for frame synchronization games
+
+    // MACROBLOCK DECODER (MDEC) (0x1F801820 data, 0x1F801824 control/status)
+    case 0x1820:
+    case 0x1824:
+        return mdec_read(physical_addr);
 
     default:
         // Fail silently or log unhandled hardware registers
@@ -449,9 +465,17 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
         int timer = (offset - 0x1100) / 0x10;
 
         switch (offset & 0xF) {
-        case 0x0: psx_timer_set_value(timer, value); return;
-        case 0x4: psx_timer_set_mode(timer, value); return;
-        case 0x8: psx_timer_set_target(timer, value); return;
+        case 0x0:
+            psx_timer_set_value(timer, value);
+            return;
+
+        case 0x4:
+            psx_timer_set_mode(timer, value);
+            return;
+
+        case 0x8:
+            psx_timer_set_target(timer, value);
+            return;
         }
     }
 
@@ -491,6 +515,12 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
 
     case 0x1814:
         psx_gpu_send_command_gp1(value);
+        break;
+
+    // MDEC command/data (0x1820) and control (0x1824).
+    case 0x1820:
+    case 0x1824:
+        mdec_write(physical_addr, value);
         break;
 
     // DMA per-channel registers (0x1080-0x10E8) are handled by the generic

@@ -219,6 +219,42 @@ Next up (in order):
   on a match, calls the function pointer at 0x1F000080. Only the pre-boot hook
   fires on scph5501; the post-boot hook does not. Offsets are in psio.h.
 
+## MDEC (Macroblock Decoder)
+
+- [x] MDEC decoder (mdec.c): decodes run-length-coded, quantized DCT blocks into
+  monochrome (4/8-bit) or colour (15/24-bit) pixels for FMV and streamed texture
+  decompression. Registers at 0x1F801820 (command/data) and 0x1F801824
+  (control/status) in the general MMIO block; bulk data moves through DMA channel
+  0 (RAM into the decoder) and channel 1 (pixels back to RAM), wired in dma.c.
+  Commands: 1 decode, 2 set quant tables, 3 set IDCT scale table. The status
+  register reports the busy, FIFO, DMA-request, depth, and remaining-word fields.
+- The decode pipeline (run-length expand and dequantize, two-pass separable IDCT,
+  YCbCr to RGB) uses the mednafen/Beetle fixed-point conventions: dequant in a
+  <<4 domain with a sign-magnitude rounding bias, an IDCT over a pre->>3 scale
+  matrix with 9-bit masking before the +-127 clamp, and a YCbCr conversion with
+  the hardware's reduced-precision green channel.
+- Two dequant modes by q_scale, both needed: q_scale > 0 quantizes (DC by
+  quant[0], AC by q_scale*quant[k]) and scatters coefficients from zig-zag into
+  natural order; q_scale == 0 carries raw coefficients (value*2, no quant table)
+  in linear order with no zig-zag. The amidog DCTBlockDecode test ROMs use the
+  q_scale == 0 path exclusively; getting only the zig-zag path right renders
+  those blocks as scrambled noise.
+- Verified against the amidog MDEC DCTBlockDecode CLUT4BPP and CLUT8BPP test ROMs
+  (REF/PSX/MDEC): every block (flat DC, horizontal cosines at rising frequency,
+  2-D gradient, checkerboard, and the letter "A") reconstructs with the correct
+  structure and orientation. The residual brightness difference versus the
+  reference PNGs is a single global display gamma applied by the hardware capture
+  (a lone gamma near 1.8 reconciles every block at once, and it lands hardest on
+  the mid-grey blocks and lightest on the high-contrast letter), not a decode
+  error. nocash and Beetle arithmetic both independently agree with the linear
+  output. Host unit test: `make mdec-test`.
+- Not yet exercised end to end: the colour (15/24-bit) path shares the same
+  decode, IDCT, and DMA plumbing as the validated monochrome path, but a real FMV
+  (a game or a colour test stream) has not been run through it. The status
+  "current block" field (bits 16-18) is left at its idle value rather than
+  advancing per block during a decode; games generally use DMA rather than
+  polling it.
+
 ## Loader (in-emulation game menu)
 
 Our own parallel-I/O backdoor loader (the real Cybdyn PSIO protocol is set aside;

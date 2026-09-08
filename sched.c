@@ -5,6 +5,7 @@
 #include "timer.h"
 #include "cdrom.h"
 #include "dma.h"
+#include "mdec.h"
 #include "pad.h"
 #include "script.h"
 
@@ -67,22 +68,31 @@ hw_next_event(void)
     uint32_t e;
 
     e = timer_next_event();
+
     if (e < d) {
         d = e;
     }
+
     e = cdrom_next_event();
+
     if (e < d) {
         d = e;
     }
+
     e = dma_next_event();
+
     if (e < d) {
         d = e;
     }
+
     e = pad_next_event();
+
     if (e < d) {
         d = e;
     }
+
     e = spu_next_event();
+
     if (e < d) {
         d = e;
     }
@@ -109,6 +119,7 @@ void
 psx_hardware_advance(uint32_t cycles)
 {
     hw_cycle += cycles;
+
     if (hw_cycle >= hw_deadline) {
         hw_flush();
     }
@@ -148,4 +159,5 @@ psx_hardware_reset(void)
     psx_gpu_reset();
     psx_cdrom_reset();
     psx_pad_reset();
+    mdec_reset();
 }

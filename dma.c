@@ -1,6 +1,7 @@
 #include "cpu.h"
 #include "dma.h"
 #include "gpu.h"
+#include "mdec.h"
 #include "mem.h"
 #include "psio.h"
 #include "cdrom.h"
@@ -110,6 +111,40 @@ dma_spu(int channel)
     }
 }
 
+// MDEC DMA. Channel 0 feeds the compressed command stream from RAM into the
+// decoder; channel 1 drains decoded pixels back to RAM. Both use SyncMode 1,
+// so the word count is block_size * block_count like the SPU transfer above.
+static uint32_t
+dma_mdec_words(int channel)
+{
+    uint32_t bcr = dma_channels[channel].bcr;
+    uint32_t block_size  = bcr & 0xFFFF;
+    uint32_t block_count = (bcr >> 16) & 0xFFFF;
+    uint32_t words = block_size * block_count;
+
+    return words ? words : block_size;
+}
+
+static void
+dma_mdec_in(int channel)
+{
+    uint32_t madr = dma_channels[channel].madr & RAM_MASK;
+    uint32_t words = dma_mdec_words(channel);
+
+    for (uint32_t i = 0; i < words; i++)
+        mdec_dma_in(MEM_READ_32((madr + i * 4) & RAM_MASK));
+}
+
+static void
+dma_mdec_out(int channel)
+{
+    uint32_t madr = dma_channels[channel].madr & RAM_MASK;
+    uint32_t words = dma_mdec_words(channel);
+
+    for (uint32_t i = 0; i < words; i++)
+        MEM_WRITE_32((madr + i * 4) & RAM_MASK, mdec_dma_out());
+}
+
 // CD-ROM DMA (channel 3): copy the current sector's data words into RAM. The
 // word count comes from BCR the same way as the card transfer above.
 static void
@@ -214,8 +249,10 @@ psx_dma_tick(uint32_t cycles)
 {
     if (dma_irq_delay > 0) {
         dma_irq_delay -= (int)cycles;
+
         if (dma_irq_delay <= 0) {
             dma_irq_delay = 0;
+
             if (dma_interrupt & 0x80000000u) {
                 cpu.i_stat |= (1u << IRQ_DMA);
             }
@@ -256,6 +293,14 @@ void
 run_dma_transfer(int channel)
 {
     switch (channel) {
+    case 0: // MDEC input: compressed stream from RAM into the decoder
+        dma_mdec_in(channel);
+        break;
+
+    case 1: // MDEC output: decoded pixels from the decoder back to RAM
+        dma_mdec_out(channel);
+        break;
+
     case 2: // GPU command lists / VRAM transfers
         dma_gpu(channel);
         break;
@@ -266,6 +311,7 @@ run_dma_transfer(int channel)
         } else {
             dma_psio_read(channel);
         }
+
         break;
 
     case 4: // SPU sound upload / download
