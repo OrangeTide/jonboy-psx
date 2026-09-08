@@ -60,6 +60,12 @@ Mount a disc image and boot it through a retail BIOS:
 `--memcard card.mcr` to attach a memory card (a raw 128 KB image, created and
 formatted if the file does not exist), so the BIOS shell and games can save.
 
+The windowed emulator runs the console on a separate thread from the window, so
+input, video, and audio stay responsive even when emulation stalls, and a disc
+image on a slow or network filesystem is read ahead on a background thread rather
+than freezing the display. A disc swapped at runtime (see Scripted input) raises
+the drive-cover interrupt, so a running game notices the change.
+
 ### Controls
 
 The keyboard maps to the pad: arrow keys are the D-pad, `Z`/`X`/`A`/`S` are
