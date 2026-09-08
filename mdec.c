@@ -71,6 +71,10 @@ static struct {
     uint8_t busy;             // a command is collecting parameters
     uint8_t enable_dma_in;
     uint8_t enable_dma_out;
+
+    uint32_t stat_decodes;    // decode commands executed since reset
+    uint32_t stat_color_mb;   // colour macroblocks produced
+    uint32_t stat_mono_blk;   // monochrome blocks produced
 } mdec;
 
 static int16_t
@@ -322,12 +326,15 @@ execute_decode(void)
 
     mdec.output_size = 0;
     mdec.output_pos = 0;
+    mdec.stat_decodes++;
 
     if (mdec.output_depth < 2) {
         int16_t yblk[64];
 
-        while (mdec_decode_block(yblk, mdec.y_quant, &pos, end))
+        while (mdec_decode_block(yblk, mdec.y_quant, &pos, end)) {
             emit_luma_block(yblk);
+            mdec.stat_mono_blk++;
+        }
 
         return;
     }
@@ -348,6 +355,7 @@ execute_decode(void)
         if (!mdec_decode_block(yblk[3], mdec.y_quant, &pos, end)) break;
 
         emit_color_macroblock(crblk, cbblk, yblk);
+        mdec.stat_color_mb++;
     }
 }
 
@@ -549,4 +557,15 @@ int
 mdec_dma_out_ready(void)
 {
     return mdec.output_pos < mdec.output_size;
+}
+
+void
+mdec_get_stats(uint32_t *decodes, uint32_t *color_macroblocks,
+               uint32_t *mono_blocks)
+{
+    if (decodes) *decodes = mdec.stat_decodes;
+
+    if (color_macroblocks) *color_macroblocks = mdec.stat_color_mb;
+
+    if (mono_blocks) *mono_blocks = mdec.stat_mono_blk;
 }

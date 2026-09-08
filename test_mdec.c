@@ -99,6 +99,37 @@ decode_cmd(uint32_t depth, uint32_t sign, uint32_t bit15, uint32_t words)
            | (words & 0xFFFFu);
 }
 
+// Decode one solid-colour 16x16 macroblock: six DC-only blocks in the hardware
+// order (Cr, Cb, Y0..Y3), each an unquantized DC (q_scale 0) so it reconstructs
+// to a flat block. 24-bit output, so the result is 16*16*3 = 768 bytes. Returns
+// the number of output bytes read.
+static int
+decode_color_mb(int dc_cr, int dc_cb, int dc_y, uint8_t out[768])
+{
+    int dcs[6] = { dc_cr, dc_cb, dc_y, dc_y, dc_y, dc_y };
+    int i, n = 0;
+
+    wr0(decode_cmd(2, 0, 0, 6)); // depth 2 = 24-bit, unsigned
+
+    for (i = 0; i < 6; i++) {
+        uint16_t hw0 = (uint16_t)(dcs[i] & 0x3FF); // q_scale 0, DC value
+        wr0(hw0 | ((uint32_t)0xFE00u << 16));      // then end-of-block
+    }
+
+    while (mdec_dma_out_ready() && n < 768) {
+        uint32_t w = mdec_dma_out();
+        out[n++] = (uint8_t)w;
+
+        if (n < 768) out[n++] = (uint8_t)(w >> 8);
+
+        if (n < 768) out[n++] = (uint8_t)(w >> 16);
+
+        if (n < 768) out[n++] = (uint8_t)(w >> 24);
+    }
+
+    return n;
+}
+
 // Feed one monochrome (8-bit) DC-only block and read back the 64 output bytes.
 // The block is one word: DC coefficient with q_scale in the high bits, then an
 // end-of-block marker. Two 16-bit halfwords pack into one 32-bit word.
@@ -194,6 +225,36 @@ main(void)
         check(depth == 3 ? "15-bit macroblock is 512 bytes"
               : "24-bit macroblock is 768 bytes",
               bytes, depth == 3 ? 512 : 768);
+    }
+
+    // ---- Colour macroblock: solid-colour reconstruction and hue ----
+    // DC-only blocks give a flat 16x16 macroblock, so every one of the 256
+    // pixels must be the same RGB triple: this exercises the six-block assembly,
+    // chroma subsampling, and YCbCr-to-RGB. Neutral chroma is grey; positive Cr
+    // pushes red above blue, positive Cb pushes blue above red.
+    mdec_reset();
+    load_scale();
+    {
+        uint8_t mb[768];
+        int n = decode_color_mb(0, 0, 300, mb); // neutral chroma, bright luma
+        check("colour macroblock is 768 bytes", n, 768);
+
+        int uniform = 1;
+
+        for (i = 3; i < 768; i++)
+            if (mb[i] != mb[i % 3]) uniform = 0;
+
+        check("solid colour macroblock is uniform", uniform, 1);
+
+        // Neutral chroma reconstructs to grey: R, G, and B all equal.
+        check("neutral chroma is grey (R==B)", mb[0], mb[2]);
+        check("neutral chroma is grey (R==G)", mb[0], mb[1]);
+
+        // Positive Cr is reddish (R > B); positive Cb is bluish (B > R).
+        decode_color_mb(240, 0, 300, mb);
+        check("positive Cr is reddish", mb[0] > mb[2], 1);
+        decode_color_mb(0, 240, 300, mb);
+        check("positive Cb is bluish", mb[2] > mb[0], 1);
     }
 
     // ---- Status reports remaining parameter words while collecting ----

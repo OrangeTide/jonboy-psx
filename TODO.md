@@ -248,11 +248,20 @@ Next up (in order):
   the mid-grey blocks and lightest on the high-contrast letter), not a decode
   error. nocash and Beetle arithmetic both independently agree with the linear
   output. Host unit test: `make mdec-test`.
-- Not yet exercised end to end: the colour (15/24-bit) path shares the same
-  decode, IDCT, and DMA plumbing as the validated monochrome path, but a real FMV
-  (a game or a colour test stream) has not been run through it. The status
-  "current block" field (bits 16-18) is left at its idle value rather than
-  advancing per block during a decode; games generally use DMA rather than
+- The colour (15/24-bit) path is unit-tested in `test_mdec.c`: a solid-colour
+  macroblock (six DC-only blocks) reconstructs uniformly across all 256 pixels,
+  neutral chroma renders grey, and positive Cr/Cb shift the hue red/blue as
+  expected. This covers the six-block assembly, chroma subsampling, and the
+  YCbCr-to-RGB conversion. `run_boot` prints an MDEC decode-command and
+  macroblock tally (`mdec_get_stats`) so an FMV run shows a rising colour count.
+- Still pending: a real game FMV through the whole pipeline (CD stream to MDEC to
+  GPU). Attempts with FF Tactics, Chrono Trigger, and Lunar all boot into game
+  code but stall in early wait loops with a black framebuffer and zero MDEC
+  decodes, so the FMV data never starts flowing. This is the general
+  game-boot-progression limitation (FFT's documented ~0x8001DD18 poll loop), not
+  an MDEC gap, and unblocking it is separate work.
+- The status "current block" field (bits 16-18) is left at its idle value rather
+  than advancing per block during a decode; games generally use DMA rather than
   polling it.
 
 ## Loader (in-emulation game menu)

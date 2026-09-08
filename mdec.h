@@ -25,4 +25,11 @@ uint32_t mdec_dma_out(void);
 
 // True while decoded output words remain for DMA channel 1 to drain.
 int mdec_dma_out_ready(void);
+
+// Decode activity counters since reset: the number of decode commands, the
+// number of colour (15/24-bit) macroblocks, and the number of monochrome
+// (4/8-bit) blocks produced. A rising colour count is the signature of FMV
+// playback. Any argument may be NULL.
+void mdec_get_stats(uint32_t *decodes, uint32_t *color_macroblocks,
+                    uint32_t *mono_blocks);
 #endif

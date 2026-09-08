@@ -17,6 +17,7 @@
 #include "cdrom.h"
 #include "spu.h"
 #include "mc.h"
+#include "mdec.h"
 #include "sched.h"
 #include "script.h"
 #include "gdb.h"
@@ -898,6 +899,15 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
     dump_registers();
     // Show the instructions around where execution ended, to spot poll loops.
     dump_memory((cpu.PC - 16) & ~0xFu, 8);
+
+    // Report MDEC activity: a nonzero colour macroblock count means the game
+    // ran FMV frames through the decoder during this boot.
+    {
+        uint32_t decodes, color_mb, mono_blk;
+        mdec_get_stats(&decodes, &color_mb, &mono_blk);
+        printf("MDEC: %u decode commands, %u colour macroblocks, %u mono blocks\n",
+               decodes, color_mb, mono_blk);
+    }
 
     if (vram_out) {
         dump_vram_ppm(vram_out);
