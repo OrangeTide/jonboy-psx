@@ -293,5 +293,17 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
 
 ## Debugging
 
-- [ ] add gdbserver interface. mipsel-unknown-elf-gdb exists
+- [x] gdbserver interface (gdb.c, `--gdb [port]`, default 1234). A GDB Remote
+  Serial Protocol server on a loopback TCP socket drives the CPU under
+  mipsel-unknown-elf-gdb: it boots the BIOS headless, starts halted at the reset
+  vector, and answers register (g/G/p/P), memory (m/M), breakpoint (Z0/z0,
+  tracked by address in the step loop), single step (s), continue (c), and
+  Ctrl-C interrupt. Registers are the standard MIPS o32 set (32 GPR, status, lo,
+  hi, badvaddr, cause, pc, and a zeroed FPU bank) declared to gdb through a
+  target description over qXfer, so gdb parses the layout without guessing. The
+  continue loop calls service_loader_boot, so sideload and the loader menu work
+  under gdb too. Verified end to end with mipsel-unknown-elf-gdb: connect,
+  register and memory read/write round-trips, a breakpoint at a BIOS address,
+  continue, and single step. Not done: watchpoints (Z2-Z4), a target.xml with
+  real FPU/GTE registers, and running the gdbserver alongside the windowed build.
 - [ ] add a handler so that a hotkey (or signal) will output CPU regs and a short stack trace.

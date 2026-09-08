@@ -101,6 +101,29 @@ frame counter:
 Commands are `pad <buttons/sticks>` (held until the next `pad` line), `analog
 on|off`, and `disc <path>` / `disc eject`.
 
+### Debugging with gdb
+
+`--gdb [port]` boots the BIOS headless and waits for `mipsel-unknown-elf-gdb` to
+connect over a loopback TCP socket (default port 1234). The CPU starts halted at
+the reset vector, so you can set breakpoints and step:
+
+```
+./_out/jonboy --gdb --bios /path/to/scph5501.bin --cd "/path/to/Game.cue"
+```
+
+Then, from gdb:
+
+```
+mipsel-unknown-elf-gdb
+(gdb) target remote 127.0.0.1:1234
+(gdb) break *0x80030000
+(gdb) continue
+```
+
+Registers, memory, breakpoints, single step (`stepi`), continue, and Ctrl-C to
+interrupt all work. Load your program's `.elf` with `file game.elf` first to get
+source-level symbols. The server listens on loopback only.
+
 ## Testing
 
 There are three layers of tests: small CPU self-tests that ship with the source,

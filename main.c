@@ -19,6 +19,7 @@
 #include "mc.h"
 #include "sched.h"
 #include "script.h"
+#include "gdb.h"
 
 // Map a host key to a digital pad button bit, or 0 if it is not a pad key.
 static uint16_t
@@ -890,6 +891,67 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
     return 0;
 }
 
+// Per-step service for the gdb run loop: keeps the loader and sideload boot live
+// under gdb, the same way the other run loops call service_loader_boot.
+static int gdb_kernel_up;
+static int gdb_sideloaded;
+
+static void
+gdb_step_service(void)
+{
+    service_loader_boot(&gdb_kernel_up, &gdb_sideloaded);
+}
+
+// Boot the BIOS under gdb control: load the devices, reset to the boot vector,
+// then hand execution to the gdb remote protocol server. The CPU starts halted
+// at the reset vector, so gdb can set breakpoints and continue. Runs headless.
+static int
+run_gdb(int port)
+{
+    if (mem_load_bios(g_bios_path) == 0) {
+        printf("BIOS loaded.\n");
+    } else {
+        printf("No BIOS loaded, continuing with blank ROM.\n");
+    }
+
+    if (g_psio_firmware) {
+        load_psio_firmware(g_psio_firmware);
+    }
+    if (g_psio_sd) {
+        load_virtual_sd_card(g_psio_sd);
+    }
+    if (g_psio_boot) {
+        inject_boot_stub(bios_rom);
+        printf("PSIO boot stub injected.\n");
+    }
+    if (g_games_dir) {
+        loader_set_games_dir(g_games_dir);
+    }
+    if (g_cd_path) {
+        if (cdrom_mount(g_cd_path) == 0) {
+            printf("Mounted disc %s\n", g_cd_path);
+        } else {
+            fprintf(stderr, "cd: failed to mount %s\n", g_cd_path);
+        }
+    }
+    if (g_memcard_path && mc_mount(g_memcard_path) == 0) {
+        printf("Memory card %s\n", g_memcard_path);
+    }
+
+    cpu_reset(0xBFC00000);
+    // Let BREAK vector to the handler so real code under debug runs normally;
+    // gdb breakpoints are tracked separately by address, not by patching BREAK.
+    cpu.halt_on_break = 0;
+
+    if (gdb_start(port) != 0) {
+        return 1;
+    }
+    gdb_run(gdb_step_service);
+    gdb_stop();
+    printf("gdb: session ended.\n");
+    return 0;
+}
+
 static void
 print_usage(const char *prog)
 {
@@ -899,6 +961,8 @@ print_usage(const char *prog)
             "  %s --headless <file> [opts]     run a flat binary with no window\n"
             "  %s --exe <file.exe> [opts]      run a PS-EXE headless (conformance)\n"
             "  %s --boot [opts]                boot the BIOS headless\n"
+            "  %s --gdb [port]                 boot under a gdb remote server\n"
+            "                                  (default port 1234, loopback only)\n"
             "Boot options (also apply to the windowed emulator):\n"
             "  --bios <file>       BIOS image to load (default bios.bin)\n"
             "  --psio              inject the PSIO boot stub over the BIOS entry\n"
@@ -914,7 +978,7 @@ print_usage(const char *prog)
             "  --pc <hex>          entry PC (default = load address)\n"
             "  --steps <n>         max instructions to run\n"
             "  --vram-out <file>   write the 320x240 VRAM region as a PPM image\n",
-            prog, prog, prog, prog);
+            prog, prog, prog, prog, prog);
 }
 
 int
@@ -924,6 +988,8 @@ main(int argc, char *argv[])
     const char *exe_file = NULL;
     const char *vram_out = NULL;
     int boot_mode = 0;
+    int gdb_mode = 0;
+    int gdb_port = 1234;
     uint32_t load_addr = 0;
     uint32_t start_pc = 0;
     int have_pc = 0;
@@ -937,6 +1003,12 @@ main(int argc, char *argv[])
             exe_file = argv[++i];
         } else if (strcmp(argv[i], "--boot") == 0) {
             boot_mode = 1;
+        } else if (strcmp(argv[i], "--gdb") == 0) {
+            gdb_mode = 1;
+            // An optional numeric argument overrides the default port.
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                gdb_port = (int)strtoul(argv[++i], NULL, 0);
+            }
         } else if (strcmp(argv[i], "--sideload") == 0 && i + 1 < argc) {
             g_sideload_exe = argv[++i];
             boot_mode = 1; // sideload runs through the boot path
@@ -981,6 +1053,10 @@ main(int argc, char *argv[])
 
     if (g_script_path && script_load(g_script_path) == 0) {
         printf("Running script %s\n", g_script_path);
+    }
+
+    if (gdb_mode) {
+        return run_gdb(gdb_port);
     }
 
     if (boot_mode) {

@@ -36,7 +36,7 @@ $(BINDIR) :
 	mkdir -p $@
 .PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test
 ## jonboy
-EMU_SRC=cdrom.c cpu.c dma.c gpu.c inject.c main.c mc.c mem.c pad.c psio.c rom.c sched.c script.c spu.c timer.c vram.c xa.c
+EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c inject.c main.c mc.c mem.c pad.c psio.c rom.c sched.c script.c spu.c timer.c vram.c xa.c
 all :: $(BINDIR)/jonboy
 clean ::
 	$(RM) $(BINDIR)/jonboy
