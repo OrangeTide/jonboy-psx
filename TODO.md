@@ -186,7 +186,14 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
   - [x] auto-sideload the loader when --games is set (no explicit --sideload).
     main.c defaults --sideload to _out/loader.exe, so the windowed build boots
     straight into the menu.
-  - [ ] scroll when there are more entries than fit on screen
+  - [ ] scroll the list when there are more entries than fit on screen. The menu
+    in loader/main.c draws every entry from the top, so a directory with more
+    games than screen rows runs the list off the bottom and the cursor can move
+    onto entries that are not visible. Track a scroll offset (top visible index)
+    that follows the cursor, clamp it so the cursor stays on screen, draw only the
+    visible window of entries, and show an indicator when more entries exist above
+    or below. The backdoor already reports the full entry count, so this is a
+    guest-side (loader/main.c) change.
 - [~] CD image support: loader_scan now indexes .cue/.bin/.iso alongside PS-EXE
   files and records each entry's type (LDR_TYPE_EXE / LDR_TYPE_CD). When the menu
   boots a CD entry, run_boot mounts the image with cdrom_mount, clears RAM, resets
