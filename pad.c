@@ -17,13 +17,20 @@
 #define DEV_PAD  1
 #define DEV_CARD 2
 
-// The addressed device pulses its acknowledge a short time after each byte is
-// clocked, not on the same cycle. Drivers (and the BIOS) clear the SIO0
-// interrupt right after writing a byte and only then wait for this acknowledge,
-// so raising it synchronously would let that clear swallow it. This delay, in
-// CPU cycles, only needs to outlast the write-then-clear window while staying
-// well within the drivers' acknowledge timeouts.
-#define SIO_ACK_DELAY_CYCLES 100
+// The addressed device pulses its acknowledge a while after each byte is
+// clocked, not on the same cycle (on hardware roughly the baud period, about a
+// thousand cycles). The delay matters because of how the BIOS controller driver
+// probes a port: it writes the address byte, waits a fixed spin, then clears
+// both the SIO0 interrupt and the I_STAT pad-interrupt bit, and only after that
+// polls I_STAT for the acknowledge to reappear. The device is taken as present
+// only if that later poll sees the bit set again. So the acknowledge has to fire
+// after the driver's clear, not before it, or the clear wipes it and the driver
+// reads the port as empty. The clear lands a few hundred cycles past the byte in
+// this core's timing, so the delay is set comfortably past that while staying
+// well within the driver's probe timeout (about 1800 cycles). A value near 100
+// fired the acknowledge before the clear and made every game that uses this BIOS
+// probe (Final Fantasy Tactics among them) see no controller.
+#define SIO_ACK_DELAY_CYCLES 500
 
 // JOY_STAT bits.
 #define STAT_TX_READY_1  0x01 // ready to accept a byte in the transmit register
