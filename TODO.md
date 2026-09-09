@@ -1,5 +1,40 @@
 # TODO
 
+## MVP roadmap
+
+The MVP goal: boot the retail BIOS and play one commercial game to interactive
+gameplay, with correct-enough video, working audio, controller input, and
+memory-card saves. Most subsystems that feed that goal are done and tested (CPU
+core, GPU rasterizer, SPU, CD-ROM, MDEC, DMA, controllers, memory cards, the emu
+thread, and a gdbserver). The remaining blockers, in priority order:
+
+- [ ] **P0: GTE (COP2), the geometry transformation engine.** The single biggest
+  gap. cpu.c has no primary-opcode case 0x12 (COP2), no LWC2/SWC2, and no GTE
+  register file, so every GTE instruction silently falls through to the no-op
+  default. Nearly every commercial title (3D and 2D) runs coordinate math through
+  GTE, so games that clear the BIOS render garbage or hang without it. See the
+  GTE section below for the full op list and plan.
+- [ ] **P0: a `gte` conformance pass.** Mirror the CPU conformance target over
+  REF/PSX/CPUTest/GTE (NCLIP and AVSZ ROMs are present; fetch the rest of the
+  amidog GTE suite into REF/) and iterate GTE to green.
+- [ ] **P0: first-game bring-up.** Drive one concrete title from BIOS to
+  interactive gameplay. FF Tactics currently stalls in kernel space at PC
+  0x8001DD34; diagnose whether that is GTE-starvation (prime suspect), a missing
+  BIOS/kernel syscall, or a timer/IRQ gate. This is the integration gate that
+  proves the MVP.
+- [ ] **P1: GPU residuals once GTE lands.** Dithering (absent) and the mask bit /
+  GP0(0xE6) set-mask/check-mask (absent). Minor visually but affect correctness on
+  real scenes. The rest of the GPU (textures, CLUT, clip, offset, all four
+  semi-transparency blend modes, STP bit, 24bpp display) is already in.
+- [ ] **P1: timer/IRQ accuracy** sufficient for the sync/target modes games gate
+  on (root counters exist; confirm against the first-game stall).
+
+P2 polish, explicitly not MVP: loader menu scrolling and backdoor byte-streaming,
+the 0x96 keyboard and 0x53 flightstick controllers, a gdb target.xml with real
+FPU/GTE registers and gdbserver in the windowed build, the debug hotkey
+register/stack dump, and the SPU tail items (CD/reverb output sweeps, 8-bit XA,
+Gaussian interpolation).
+
 ## controller port
 
 Current state: a DualShock in slot 1 works in both digital and analog mode. pad.c
@@ -289,6 +324,45 @@ Next up (in order):
 - The status "current block" field (bits 16-18) is left at its idle value rather
   than advancing per block during a decode; games generally use DMA rather than
   polling it.
+
+## GTE (Geometry Transformation Engine, COP2)
+
+The PS1 geometry coprocessor: a fixed-point vector/matrix unit the CPU drives
+over coprocessor-2 instructions. It is the top MVP blocker (see the roadmap).
+Reference math: nocash psx-spx (GTE section), and the pcsx-redux / mednafen GTE
+implementations. Validation: REF/PSX/CPUTest/GTE (amidog).
+
+Register file (to add to R3051_CPU in cpu.h):
+- 32 data registers (cop2d 0-31): the vectors V0/V1/V2 (VXY0..VZ2), RGBC, OTZ,
+  the accumulators IR0-IR3, the screen-coordinate FIFO SXY0-2/SZ0-3, the colour
+  FIFO RGB0-2, the MAC0-3 accumulators, the IRGB/ORGB colour-conversion regs, the
+  leading-zero count in/out LZCS/LZCR, and RES1.
+- 32 control registers (cop2c 0-31): the rotation matrix RT, translation vector
+  TR, the light matrix LLM and light colour matrix LCM, the background/far colour
+  vectors BK/FC, the screen offset OFX/OFY, projection plane distance H, depth-cue
+  scale/offset DQA/DQB, the Z-average scale factors ZSF3/ZSF4, and the FLAG error
+  register.
+
+Plan:
+- [ ] register file + the flag register in cpu.h, zeroed on reset.
+- [ ] move and load/store ops in cpu.c: MFC2, CFC2, MTC2, CTC2 (primary opcode
+  0x12 sub-ops), and LWC2 (0x32) / SWC2 (0x3A). Respect the load-delay model the
+  rest of the CPU uses. Some cop2 data registers read back differently from what
+  was written (SXYP mirror, IRGB/ORGB, the sign-extended/truncated ones), so the
+  move ops need the per-register read/write quirks, not a flat array copy.
+- [ ] the command ops (COP2 with bit 25 set, selected by the low function bits),
+  with the shared MAC/IR pipeline, the per-op shift (sf), the lm saturation flag,
+  and the FLAG bits: RTPS/RTPT (perspective transform, the depth-cue and the SZ/SXY
+  FIFO pushes), NCLIP (normal clipping), AVSZ3/AVSZ4 (Z averaging), the lighting
+  ops NCDS/NCDT/NCCS/NCS/NCT/CC/CDP/DPCS/DPCT/INTPL, MVMVA (the general
+  matrix-vector multiply with its mx/v/tx selector), SQR, OP, GPF, GPL.
+- [ ] FLAG register: accumulate the MAC/IR/SZ/SXY/divide overflow and saturation
+  bits each op, set the master error bit (bit 31) from the sticky error mask, and
+  clear FLAG at the start of each command.
+- [ ] the RTPS/RTPT unsigned Newton-Raphson division (H / SZ3) with its overflow
+  clamp to 0x1FFFF, matching the hardware UNR table, not a plain integer divide.
+- [ ] wire a `gte` conformance target and get NCLIP + AVSZ green first, then the
+  rest of the suite.
 
 ## Loader (in-emulation game menu)
 
