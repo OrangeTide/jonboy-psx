@@ -16,11 +16,16 @@ thread, and a gdbserver). The remaining blockers, in priority order:
   suite over REF/PSX/CPUTest/GTE. NCLIP and AVSZ both PASS. Only those two ROMs
   are present locally; fetching the rest of the amidog GTE suite into REF/ to
   exercise RTPS/MVMVA/the lighting ops through conformance stays open.
-- [ ] **P0: first-game bring-up.** Drive one concrete title from BIOS to
-  interactive gameplay. FF Tactics currently stalls in kernel space at PC
-  0x8001DD34; diagnose whether that is GTE-starvation (prime suspect), a missing
-  BIOS/kernel syscall, or a timer/IRQ gate. This is the integration gate that
-  proves the MVP.
+- [~] **P0: first-game bring-up.** Drive one concrete title from BIOS to
+  interactive gameplay. With GTE implemented, FF Tactics now boots the retail
+  BIOS from its mounted disc and reaches its title screen (logo, map art, and the
+  NEW GAME / CONTINUE / TUTORIAL / SOUND menu) by ~600M steps, then plays its
+  intro narrative sequence (screenshot assets/fft_title.png). The old
+  "stall at 0x8001DD34" was a pre-GTE artifact: that address is the game's own
+  attract/frame-wait loop, which it passes through normally once GTE answers its
+  geometry. Remaining to prove the MVP: confirm the title menu takes pad input
+  and a New Game reaches the battle/map gameplay, and chase the thin vertical RGB
+  line artifact seen over the intro map. Then repeat with a second title.
 - [ ] **P1: GPU residuals once GTE lands.** Dithering (absent) and the mask bit /
   GP0(0xE6) set-mask/check-mask (absent). Minor visually but affect correctness on
   real scenes. The rest of the GPU (textures, CLUT, clip, offset, all four
@@ -318,8 +323,9 @@ Next up (in order):
   static inline in mem.h). The decoded frames then rendered "quilted" (per-8x8
   transpose) from the MDEC IDCT transpose and q_scale == 0 divergence fixed
   above, compounded by a missing 24bpp display readout (GP1(08) bit 4), now added
-  in main.c. FF Tactics and Chrono Trigger stall earlier still (FFT at its
-  documented ~0x8001DD18 poll loop), a separate matter from the MDEC path.
+  in main.c. FF Tactics reaches its title screen and intro once GTE is present
+  (see the MVP roadmap); its old ~0x8001DD18 loop was the attract/frame-wait
+  loop, not a stall. Chrono Trigger has not been rechecked since GTE landed.
 - The status "current block" field (bits 16-18) is left at its idle value rather
   than advancing per block during a decode; games generally use DMA rather than
   polling it.
