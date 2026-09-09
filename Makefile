@@ -35,7 +35,7 @@ conformance : $(BINDIR)/jonboy
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test
+.PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test mdec-oracle
 ## jonboy
 EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c inject.c main.c mc.c mdec.c mem.c pad.c psio.c rom.c sched.c script.c spu.c timer.c vram.c xa.c
 all :: $(BINDIR)/jonboy
@@ -94,6 +94,23 @@ script-test : $(BINDIR)/test_script
 	./$(BINDIR)/test_script
 mdec-test : $(BINDIR)/test_mdec
 	./$(BINDIR)/test_mdec
+
+# Byte-exact cross-check of the MDEC decoder against the real mednafen/Beetle
+# mdec.c. That source is not part of this repository; fetch it under
+# REF/beetle-mdec (git-ignored, like the conformance ROMs) to enable the check.
+# The Beetle object is built with warnings off since it is third-party code.
+BEETLE_MDEC = REF/beetle-mdec/psx/mdec.c
+mdec-oracle : test_mdec_oracle.c mdec.c mdec.h | $(BINDIR)
+	@if [ ! -f $(BEETLE_MDEC) ]; then \
+	    echo "mdec-oracle: $(BEETLE_MDEC) not present; skipping."; \
+	    echo "  Fetch the beetle-psx mednafen/psx MDEC source under REF/beetle-mdec to enable."; \
+	else \
+	    $(CC) -c -O2 -w -I REF/beetle-mdec/libretro-common/include \
+	        -o $(BINDIR)/beetle_mdec.o $(BEETLE_MDEC) && \
+	    $(CC) -o $(BINDIR)/test_mdec_oracle $(CFLAGS) \
+	        test_mdec_oracle.c mdec.c $(BINDIR)/beetle_mdec.o && \
+	    ./$(BINDIR)/test_mdec_oracle; \
+	fi
 ## testcarts
 TESTS=test1 test2 test3 test4 test5 test6 test7 test8 test9
 TEST_CARTS=$(TESTS:%=$(BINDIR)/%.cart)

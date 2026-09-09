@@ -293,7 +293,7 @@ ref_idct(const int16_t *in, int16_t *out)
             for (u = 0; u < 8; u++)
                 s += (int)tmp[col * 8 + u] * (int)ref_mat[x * 8 + u];
 
-            out[x * 8 + col] = (int16_t)ref_mask9((s + 0x4000) >> 15);
+            out[col * 8 + x] = (int16_t)ref_mask9((s + 0x4000) >> 15);
         }
 }
 
@@ -576,6 +576,7 @@ main(void)
     // pushes red above blue, positive Cb pushes blue above red.
     mdec_reset();
     load_scale();
+    load_quant(2); // DC quantizer 2, so the DC test values stay in range
     {
         uint8_t mb[768];
         int n = decode_color_mb(0, 0, 300, mb); // neutral chroma, bright luma

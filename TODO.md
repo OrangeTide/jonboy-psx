@@ -233,12 +233,15 @@ Next up (in order):
   <<4 domain with a sign-magnitude rounding bias, an IDCT over a pre->>3 scale
   matrix with 9-bit masking before the +-127 clamp, and a YCbCr conversion with
   the hardware's reduced-precision green channel.
-- Two dequant modes by q_scale, both needed: q_scale > 0 quantizes (DC by
-  quant[0], AC by q_scale*quant[k]) and scatters coefficients from zig-zag into
-  natural order; q_scale == 0 carries raw coefficients (value*2, no quant table)
-  in linear order with no zig-zag. The amidog DCTBlockDecode test ROMs use the
-  q_scale == 0 path exclusively; getting only the zig-zag path right renders
-  those blocks as scrambled noise.
+- One dequant path, matching Beetle's WriteImageData exactly: the DC term is
+  quantized by quant[0] and each AC term by q_scale*quant[k], and every
+  coefficient (DC included) scatters from its zig-zag scan position into natural
+  block order. When the effective quantizer is zero (a zero table entry, or
+  q_scale zero for an AC term) the coefficient is taken raw and doubled, still
+  through the zig-zag scatter. An earlier version special-cased q_scale == 0 as a
+  separate linear-order, no-zig-zag mode and also skipped quant[0] for the DC;
+  that passed the amidog ROMs but transposed and misplaced real FMV
+  coefficients. The zig-zag scatter is always applied now.
 - Verified against the amidog MDEC DCTBlockDecode CLUT4BPP and CLUT8BPP test ROMs
   (REF/PSX/MDEC): every block (flat DC, horizontal cosines at rising frequency,
   2-D gradient, checkerboard, and the letter "A") reconstructs with the correct
@@ -260,20 +263,29 @@ Next up (in order):
   reference pipeline transcribed independently from the mednafen/Beetle MDEC
   (dequant, YCbCr, and the RGB555 uint8 truncation). This exercises the AC path
   the DC-only checks miss and locks the decoder to the hardware-faithful result.
-  All six blocks use a nonzero q_scale; the raw q_scale == 0 path stays covered
-  by the amidog ROMs.
-- Still pending: a real game FMV through the whole pipeline (CD stream to MDEC to
-  GPU). Lunar Silver Star Story now boots past its old timer stall (see the timer
-  clock-source fix), renders the copyright screen, and streams its intro FMV off
-  the CD: the drive delivers the STR video sectors as INT1 and routes the
-  interleaved XA audio to the SPU (mode 0xC0, ReadS from LBA 36748). The game's CD
-  interrupt handler acks every sector, but its main loop stays parked at PC
-  0x80093CA8 waiting on a decode-queue state field to reach 2 and never issues an
-  MDEC command, so no frame is decoded. The CD path and timers are correct here;
-  the remaining blocker is in the game's own FMV decode-trigger state machine and
-  needs per-game tracing (watchpoint on the queue entry the loop polls). FF
-  Tactics and Chrono Trigger stall earlier still (FFT at its documented
-  ~0x8001DD18 poll loop).
+  All six blocks use a nonzero q_scale; the raw (zero-quantizer) path stays
+  covered by the amidog ROMs.
+- A stronger byte-exact cross-check drives the real decoder and the real
+  mednafen/Beetle mdec.c on identical input and diffs the output. Unlike the
+  hand-transcribed pin, it catches bugs shared between the decoder and a
+  transcribed reference. It found the IDCT transpose and the q_scale == 0
+  divergence above. The Beetle source is not in the repo; fetch it under
+  REF/beetle-mdec (git-ignored) and run `make mdec-oracle`, which skips cleanly
+  when the source is absent. Covers mono q8, mono q0 (the amidog path), and 24-
+  and 15-bit colour macroblocks; all byte-exact.
+- Real game FMV through the whole pipeline (CD stream to MDEC to GPU) now works:
+  Lunar Silver Star Story boots past its old timer stall (see the timer
+  clock-source fix), renders the copyright screen, and streams and decodes its
+  intro FMV. The drive delivers the STR video sectors as INT1 and routes the
+  interleaved XA audio to the SPU (mode 0xC0, ReadS from LBA 36748); the game
+  issues MDEC decode commands and the decoded frames render as a sharp coherent
+  image. Two bugs had to be cleared first. The MDEC-out DMA was decimated because
+  the MEM_WRITE_32 macro double-evaluated its side-effecting argument (now a
+  static inline in mem.h). The decoded frames then rendered "quilted" (per-8x8
+  transpose) from the MDEC IDCT transpose and q_scale == 0 divergence fixed
+  above, compounded by a missing 24bpp display readout (GP1(08) bit 4), now added
+  in main.c. FF Tactics and Chrono Trigger stall earlier still (FFT at its
+  documented ~0x8001DD18 poll loop), a separate matter from the MDEC path.
 - The status "current block" field (bits 16-18) is left at its idle value rather
   than advancing per block during a decode; games generally use DMA rather than
   polling it.

@@ -111,9 +111,11 @@ mask9_clamp_s8(int v)
     return clamp_int(v, -128, 127);
 }
 
-// Two separable 1-D IDCT passes over the >>3 scale matrix. Pass one keeps
-// int16 and transposes (out[x*8+col]); pass two clamps through mask9_clamp_s8.
-// Rounding is (sum + 0x4000) >> 15.
+// Two separable 1-D IDCT passes over the >>3 scale matrix, following Beetle's
+// IDCT_1D_Pass1/Pass2. Pass one keeps int16 and transposes (out[x*8+col]); pass
+// two writes back non-transposed (out[col*8+x]) through mask9_clamp_s8, so the
+// two passes net one transpose, matching the hardware orientation. Rounding is
+// (sum + 0x4000) >> 15.
 static void
 idct_block(int16_t *block)
 {
@@ -144,7 +146,7 @@ idct_block(int16_t *block)
             for (u = 0; u < 8; u++)
                 sum += (int)src[u] * (int)sc[u];
 
-            block[x * 8 + col] = (int16_t)mask9_clamp_s8((sum + 0x4000) >> 15);
+            block[col * 8 + x] = (int16_t)mask9_clamp_s8((sum + 0x4000) >> 15);
         }
     }
 }
@@ -154,11 +156,11 @@ idct_block(int16_t *block)
 // in the <<4 fixed-point domain that feeds the >>3 IDCT matrix, with a
 // sign-magnitude rounding bias on each nonzero quantized term.
 //
-// q_scale selects two hardware modes. With q_scale > 0 the coefficients are
-// quantized (DC by quant[0], AC by q_scale*quant[k]) and scattered from their
-// zig-zag order into natural block order. With q_scale == 0 the stream carries
-// raw coefficients (value * 2, no quant table) laid out in linear order, so the
-// run index addresses the block directly without the zig-zag scatter.
+// The DC term is quantized by quant[0]; each AC term by q_scale*quant[k]. When
+// the effective quantizer is zero (a zero table entry, or q_scale zero for an
+// AC term) the coefficient is taken raw, doubled. Every term scatters from its
+// zig-zag scan position into the natural block order, following the mednafen/
+// Beetle WriteImageData path exactly.
 static int
 mdec_decode_block(int16_t *block, const uint8_t *quant, uint32_t *pos, uint32_t end)
 {
@@ -178,14 +180,9 @@ mdec_decode_block(int16_t *block, const uint8_t *quant, uint32_t *pos, uint32_t 
     q_scale = (word >> 10) & 0x3Fu;
     ci = sign_extend_10(word & 0x03FFu);
     q = (int)quant[0];
-
-    if (q_scale == 0)
-        tmp = (ci * 2) << 4;
-    else
-        tmp = (q != 0) ? (((ci * q) << 4) + (ci ? (ci < 0 ? 8 : -8) : 0))
-              : ((ci * 2) << 4);
-
-    block[0] = (int16_t)clamp_int(tmp, -0x4000, 0x3FFF);
+    tmp = (q != 0) ? (((ci * q) << 4) + (ci ? (ci < 0 ? 8 : -8) : 0))
+          : ((ci * 2) << 4);
+    block[zigzag_to_linear[0]] = (int16_t)clamp_int(tmp, -0x4000, 0x3FFF);
 
     k = 0;
 
@@ -199,16 +196,10 @@ mdec_decode_block(int16_t *block, const uint8_t *quant, uint32_t *pos, uint32_t 
         if (k >= 64u) break;
 
         ci = sign_extend_10(word & 0x03FFu);
-
-        if (q_scale == 0) {
-            block[k] = (int16_t)clamp_int((ci * 2) << 4, -0x4000, 0x3FFF);
-        } else {
-            q = (int)q_scale * (int)quant[k];
-            tmp = (q != 0)
-                  ? ((((ci * q) >> 3) << 4) + (ci ? (ci < 0 ? 8 : -8) : 0))
-                  : ((ci * 2) << 4);
-            block[zigzag_to_linear[k]] = (int16_t)clamp_int(tmp, -0x4000, 0x3FFF);
-        }
+        q = (int)q_scale * (int)quant[k];
+        tmp = (q != 0) ? ((((ci * q) >> 3) << 4) + (ci ? (ci < 0 ? 8 : -8) : 0))
+              : ((ci * 2) << 4);
+        block[zigzag_to_linear[k]] = (int16_t)clamp_int(tmp, -0x4000, 0x3FFF);
     }
 
     idct_block(block);
