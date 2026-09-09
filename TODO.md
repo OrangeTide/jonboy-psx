@@ -50,15 +50,18 @@ thread, and a gdbserver). The remaining blockers, in priority order:
   GP0(0xE6) set-mask/check-mask (absent). Minor visually but affect correctness on
   real scenes. The rest of the GPU (textures, CLUT, clip, offset, all four
   semi-transparency blend modes, STP bit, 24bpp display) is already in.
-- [ ] **P1: horizontal display range (GP1(06)).** The vertical range (GP1(07)) is
-  now honored, so a mode that draws fewer lines than it allows no longer leaks
-  stale VRAM along the bottom (Chrono Trigger's 224-line screens showed a red/pink
-  band there after an FMV). The horizontal range is still ignored: disp_w comes
-  only from the GP1(08) resolution, so a screen narrower than the mode width shows
-  a strip of stale VRAM down the right edge (visible on the Chrono Trigger title,
-  and likely the thin vertical RGB line over FFT maps). Derive the active width
-  from GP1(06) X1/X2 divided by the dot clock and clamp disp_w to it, the same way
-  psx_gpu_active_height does for rows.
+- [x] **P1: display range (GP1(06)/(07)).** Both the vertical and horizontal
+  display ranges are now honored, so a mode that draws a smaller picture than it
+  allows no longer leaks stale VRAM around the edges. Chrono Trigger's 224-line
+  screens showed a red/pink band along the bottom after an FMV (the decoded 24bpp
+  video sat in the rows below the picture); that band is gone. psx_gpu_active_width
+  and psx_gpu_active_height derive the visible size from the ranges, clamped to the
+  mode size, and both present and the headless dump use them. Chrono Trigger sets
+  the horizontal range to exactly the mode width, so the visible horizontal change
+  was only in the headless dump (it had hardcoded 320 columns). The "thin vertical
+  RGB line over FFT maps" is likely a separate artifact and still needs its own
+  diagnosis (FFT's title uses a full-width range; its gameplay range is
+  unconfirmed).
 - [ ] **P1: timer/IRQ accuracy** sufficient for the sync/target modes games gate
   on (root counters exist; confirm against the first-game stall).
 
