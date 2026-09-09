@@ -304,10 +304,11 @@ publish_frame(AppContext *app)
 
     g_frame_meta[app->produce_idx].dx = gpu.disp_x;
     g_frame_meta[app->produce_idx].dy = gpu.disp_y;
-    g_frame_meta[app->produce_idx].dw = gpu.disp_w;
-    // Present only the scanlines the vertical range covers, so a mode that draws
-    // fewer lines than it allows (Chrono Trigger's 224-line screens in a 240-line
-    // mode) does not leak the stale VRAM below the picture onto the screen.
+    // Present only the columns and scanlines the display range covers, so a mode
+    // that draws a smaller picture than it allows (Chrono Trigger's 224-line,
+    // sub-320-wide screens) does not leak the stale VRAM around the picture onto
+    // the screen.
+    g_frame_meta[app->produce_idx].dw = psx_gpu_active_width();
     g_frame_meta[app->produce_idx].dh = psx_gpu_active_height();
     g_frame_meta[app->produce_idx].blank = gpu.disp_blank;
     g_frame_meta[app->produce_idx].bpp24 = gpu.disp_24bpp;
@@ -807,16 +808,17 @@ dump_vram_ppm_impl(const char *path, int quiet)
 
     int ox = full ? 0 : gpu.disp_x;
     int oy = full ? 0 : gpu.disp_y;
-    // Rows the vertical display range does not cover hold stale VRAM; the
-    // windowed build hides them, so blank them here too instead of dumping
-    // garbage. In the full-VRAM view every row is shown as-is.
+    // Pixels the display range does not cover hold stale VRAM; the windowed
+    // build hides them, so blank them here too instead of dumping garbage. In
+    // the full-VRAM view every pixel is shown as-is.
     int active_h = full ? h : psx_gpu_active_height();
+    int active_w = full ? w : psx_gpu_active_width();
 
     for (int y = 0; y < h; y++) {
         int row = (oy + y) & 0x1FF;
         for (int x = 0; x < w; x++) {
             unsigned char rgb[3];
-            if (y >= active_h) {
+            if (y >= active_h || x >= active_w) {
                 rgb[0] = rgb[1] = rgb[2] = 0;
             } else if (!full && gpu.disp_24bpp) {
                 // 24-bit display: three packed bytes per pixel across the

@@ -55,6 +55,8 @@ typedef struct {
     int32_t disp_h;      // displayed height in pixels (from vertical res)
     int32_t disp_blank;  // 1 = display disabled (blank screen), 0 = enabled
     int32_t disp_24bpp;  // 1 = 24-bit color mode, 0 = 15-bit
+    int32_t disp_range_x1; // GP1(06) first displayed dot-clock cycle
+    int32_t disp_range_x2; // GP1(06) dot-clock cycle just past the last displayed
     int32_t disp_range_y1; // GP1(07) first displayed scanline
     int32_t disp_range_y2; // GP1(07) scanline just past the last displayed one
 } PSX_GPU;
@@ -67,6 +69,13 @@ extern PSX_GPU gpu;
 // below the picture; presenting only the active rows keeps that garbage off
 // screen the way a TV's overscan does.
 int psx_gpu_active_height(void);
+
+// Visible width in VRAM columns implied by the GP1(06) horizontal display range,
+// clamped to the mode width (disp_w). The horizontal range is measured in GPU
+// dot-clock cycles, so the pixel count divides out the cycles per pixel for the
+// current resolution. As with the height, a range narrower than the mode would
+// otherwise show stale VRAM down the right edge of the picture.
+int psx_gpu_active_width(void);
 
 void psx_gpu_reset(void);
 void psx_gpu_send_command_gp0(uint32_t value);

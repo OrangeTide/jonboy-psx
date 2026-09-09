@@ -30,8 +30,40 @@ psx_gpu_reset(void)
     gpu.disp_h = 240;
     gpu.disp_blank = 1; // the display is disabled until software enables it
     gpu.disp_24bpp = 0;
+    gpu.disp_range_x1 = 0x260; // the standard 320-pixel active window (608..3168)
+    gpu.disp_range_x2 = 0xC60;
     gpu.disp_range_y1 = 16;  // the standard NTSC 240-line active window
     gpu.disp_range_y2 = 256;
+}
+
+// Dot-clock cycles the GPU spends per output pixel at the current resolution.
+// The horizontal display range is measured in these cycles.
+static int
+disp_dot_cycles(void)
+{
+    switch (gpu.disp_w) {
+    case 256: return 10;
+    case 368: return 7;
+    case 512: return 5;
+    case 640: return 4;
+    default:  return 8; // 320
+    }
+}
+
+// Visible width from the GP1(06) horizontal range, in pixels. Never exceeds the
+// mode width and falls back to it if the range is empty or unset.
+int
+psx_gpu_active_width(void)
+{
+    int cycles = gpu.disp_range_x2 - gpu.disp_range_x1;
+
+    if (cycles <= 0) {
+        return gpu.disp_w;
+    }
+
+    int pixels = cycles / disp_dot_cycles();
+
+    return pixels < gpu.disp_w ? pixels : gpu.disp_w;
 }
 
 // Visible height from the GP1(07) vertical range. In interlaced (480-line)
@@ -1064,7 +1096,9 @@ psx_gpu_send_command_gp1(uint32_t value)
         gpu.disp_y = (value >> 10) & 0x1FF;
         break;
 
-    case 0x06: // Horizontal display range (screen timing, not output size)
+    case 0x06: // Horizontal display range: the dot-clock cycles the picture spans.
+        gpu.disp_range_x1 = value & 0xFFF;
+        gpu.disp_range_x2 = (value >> 12) & 0xFFF;
         break;
 
     case 0x07: // Vertical display range: the scanlines the picture occupies.
