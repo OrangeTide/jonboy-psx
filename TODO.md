@@ -50,6 +50,15 @@ thread, and a gdbserver). The remaining blockers, in priority order:
   GP0(0xE6) set-mask/check-mask (absent). Minor visually but affect correctness on
   real scenes. The rest of the GPU (textures, CLUT, clip, offset, all four
   semi-transparency blend modes, STP bit, 24bpp display) is already in.
+- [ ] **P1: horizontal display range (GP1(06)).** The vertical range (GP1(07)) is
+  now honored, so a mode that draws fewer lines than it allows no longer leaks
+  stale VRAM along the bottom (Chrono Trigger's 224-line screens showed a red/pink
+  band there after an FMV). The horizontal range is still ignored: disp_w comes
+  only from the GP1(08) resolution, so a screen narrower than the mode width shows
+  a strip of stale VRAM down the right edge (visible on the Chrono Trigger title,
+  and likely the thin vertical RGB line over FFT maps). Derive the active width
+  from GP1(06) X1/X2 divided by the dot clock and clamp disp_w to it, the same way
+  psx_gpu_active_height does for rows.
 - [ ] **P1: timer/IRQ accuracy** sufficient for the sync/target modes games gate
   on (root counters exist; confirm against the first-game stall).
 
