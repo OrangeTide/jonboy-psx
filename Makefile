@@ -33,9 +33,20 @@ conformance : $(BINDIR)/jonboy
 	    if [ "$$v" = PASS ]; then pass=$$((pass+1)); else fail=$$((fail+1)); fi; \
 	done; \
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
+# Run the PeterLemon GTE (coprocessor 2) tests, the same verdict scheme as the
+# CPU conformance suite. The ROMs live under REF/ and are not part of the repo.
+GTETESTS=$(sort $(wildcard REF/PSX/CPUTest/GTE/*/*.exe REF/PSX/CPUTest/GTE/*/*/*.exe))
+gte-conformance : $(BINDIR)/jonboy
+	@pass=0; fail=0; \
+	for exe in $(GTETESTS); do \
+	    v=$$(./$(BINDIR)/jonboy --exe "$$exe" 2>/dev/null | grep VERDICT | awk '{print $$2}'); \
+	    printf "%-14s %s\n" "$$(basename $$exe .exe)" "$$v"; \
+	    if [ "$$v" = PASS ]; then pass=$$((pass+1)); else fail=$$((fail+1)); fi; \
+	done; \
+	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test mdec-oracle
+.PHONY: all clean clean-all run fmt conformance gte-conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test mdec-oracle
 ## jonboy
 EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c gte.c inject.c main.c mc.c mdec.c mem.c pad.c psio.c rom.c sched.c script.c spu.c timer.c vram.c xa.c
 all :: $(BINDIR)/jonboy

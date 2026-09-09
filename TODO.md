@@ -8,15 +8,14 @@ memory-card saves. Most subsystems that feed that goal are done and tested (CPU
 core, GPU rasterizer, SPU, CD-ROM, MDEC, DMA, controllers, memory cards, the emu
 thread, and a gdbserver). The remaining blockers, in priority order:
 
-- [ ] **P0: GTE (COP2), the geometry transformation engine.** The single biggest
-  gap. cpu.c has no primary-opcode case 0x12 (COP2), no LWC2/SWC2, and no GTE
-  register file, so every GTE instruction silently falls through to the no-op
-  default. Nearly every commercial title (3D and 2D) runs coordinate math through
-  GTE, so games that clear the BIOS render garbage or hang without it. See the
-  GTE section below for the full op list and plan.
-- [ ] **P0: a `gte` conformance pass.** Mirror the CPU conformance target over
-  REF/PSX/CPUTest/GTE (NCLIP and AVSZ ROMs are present; fetch the rest of the
-  amidog GTE suite into REF/) and iterate GTE to green.
+- [x] **P0: GTE (COP2), the geometry transformation engine.** Implemented in
+  gte.c / gte.h with the full register file, the move/load/store ops in cpu.c, and
+  the command ops (RTPS/RTPT, NCLIP, MVMVA, the lighting ops, AVSZ3/4, SQR, OP,
+  GPF, GPL, and the rest). See the GTE section below.
+- [x] **P0: a `gte` conformance pass.** `make gte-conformance` mirrors the CPU
+  suite over REF/PSX/CPUTest/GTE. NCLIP and AVSZ both PASS. Only those two ROMs
+  are present locally; fetching the rest of the amidog GTE suite into REF/ to
+  exercise RTPS/MVMVA/the lighting ops through conformance stays open.
 - [ ] **P0: first-game bring-up.** Drive one concrete title from BIOS to
   interactive gameplay. FF Tactics currently stalls in kernel space at PC
   0x8001DD34; diagnose whether that is GTE-starvation (prime suspect), a missing
@@ -356,19 +355,30 @@ Plan:
   matching this core's MFC0 treatment (the hardware load delay on these is not
   modeled, same as MFC0); LWC2/SWC2 check word alignment and raise ADEL/ADES. A
   COP2 command instruction (bit 25 set) routes to gte_execute.
-- [ ] the command ops (COP2 with bit 25 set, selected by the low function bits),
-  with the shared MAC/IR pipeline, the per-op shift (sf), the lm saturation flag,
-  and the FLAG bits: RTPS/RTPT (perspective transform, the depth-cue and the SZ/SXY
-  FIFO pushes), NCLIP (normal clipping), AVSZ3/AVSZ4 (Z averaging), the lighting
-  ops NCDS/NCDT/NCCS/NCS/NCT/CC/CDP/DPCS/DPCT/INTPL, MVMVA (the general
-  matrix-vector multiply with its mx/v/tx selector), SQR, OP, GPF, GPL.
-- [ ] FLAG register: accumulate the MAC/IR/SZ/SXY/divide overflow and saturation
-  bits each op, set the master error bit (bit 31) from the sticky error mask, and
-  clear FLAG at the start of each command.
-- [ ] the RTPS/RTPT unsigned Newton-Raphson division (H / SZ3) with its overflow
-  clamp to 0x1FFFF, matching the hardware UNR table, not a plain integer divide.
-- [ ] wire a `gte` conformance target and get NCLIP + AVSZ green first, then the
-  rest of the suite.
+- [x] the command ops (COP2 with bit 25 set, selected by the low 6 function
+  bits), with the shared MAC/IR pipeline in gte.c: a 44-bit accumulator with
+  sticky overflow tracking, the per-op shift (sf), the lm saturation floor, and
+  the IR/colour/screen clamps. Implemented: RTPS/RTPT (perspective transform, the
+  depth-cue and the SZ/SXY FIFO pushes), NCLIP (normal clipping), AVSZ3/AVSZ4 (Z
+  averaging), the lighting ops NCDS/NCDT/NCCS/NCCT/NCS/NCT/CC/CDP/DPCS/DPCT/DCPL/
+  INTPL, MVMVA (the general matrix-vector multiply with its mx/v/cv selector and
+  the FC-bug far-colour path), SQR, OP, GPF, GPL. The math follows nocash psx-spx
+  and the pcsx-redux reference.
+- [x] FLAG register: each op clears FLAG, accumulates the MAC/IR/colour/SZ/SXY/
+  divide overflow and saturation bits as it runs, and recomputes the master error
+  bit (bit 31) from the sticky error mask at the end.
+- [x] the RTPS/RTPT unsigned Newton-Raphson division (H / SZ3) with its overflow
+  clamp to 0x1FFFF, built from the hardware UNR reciprocal table, not a plain
+  integer divide.
+- [x] wired the `gte-conformance` make target (same verdict scheme as the CPU
+  suite, over REF/PSX/CPUTest/GTE). NCLIP and AVSZ both PASS. Only those two ROMs
+  are present locally; RTPS/MVMVA/the lighting ops are validated against the
+  pcsx-redux reference math, and fetching the rest of the amidog GTE suite into
+  REF/ to exercise them through conformance stays on the list.
+- Not modeled: the GTE command cycle cost (5-44 cycles per op). The interpreter
+  charges the uniform per-instruction cost, so GTE-heavy code completes its
+  geometry a little early relative to the CPU clock. This matches how most
+  interpreters run the GTE and is not expected to affect correctness.
 
 ## Loader (in-emulation game menu)
 
