@@ -788,7 +788,7 @@ bgr555_to_rgb(uint16_t px, int *r, int *g, int *b)
 // VRAM as raw 15-bit instead, which is needed to inspect off-screen texture
 // pages such as the shell flame at (896,0).
 static void
-dump_vram_ppm(const char *path)
+dump_vram_ppm_impl(const char *path, int quiet)
 {
     FILE *f = fopen(path, "wb");
 
@@ -835,7 +835,47 @@ dump_vram_ppm(const char *path)
     }
 
     fclose(f);
-    printf("Wrote VRAM image to %s\n", path);
+    if (!quiet) {
+        printf("Wrote VRAM image to %s\n", path);
+    }
+}
+
+static void
+dump_vram_ppm(const char *path)
+{
+    dump_vram_ppm_impl(path, 0);
+}
+
+// Periodic-screenshot debug aid. When --frames-out is set, the boot loop writes
+// a numbered framebuffer PPM every N video frames from a start frame on, so a
+// single headless run produces a filmstrip. This makes it practical to see and
+// choreograph timed pad input (menus, naming screens, cutscenes) that one
+// end-of-run screenshot cannot show.
+static const char *g_frames_dir = NULL; // directory for periodic framebuffer dumps
+static int g_frames_every = 30;         // dump one frame every this many video frames
+static uint32_t g_frames_from = 0;      // first video frame to start dumping at
+
+static void
+maybe_dump_frame(uint64_t steps)
+{
+    static long last_dumped = -1;
+
+    if (!g_frames_dir) {
+        return;
+    }
+
+    long frame = (long)(steps / STEPS_PER_FRAME);
+
+    if (frame == last_dumped || frame < (long)g_frames_from
+        || (frame % g_frames_every) != 0) {
+        return;
+    }
+
+    last_dumped = frame;
+
+    char path[1024];
+    snprintf(path, sizeof path, "%s/frame%06ld.ppm", g_frames_dir, frame);
+    dump_vram_ppm_impl(path, 1);
 }
 
 // Count green (PASS) and red (FAIL) glyph pixels in the result column of the
@@ -968,6 +1008,7 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
         service_loader_boot(&kernel_up, &sideloaded);
         step_cpu();
         steps++;
+        maybe_dump_frame(steps);
     }
 
     printf("Ran %llu steps.\n", (unsigned long long)steps);
@@ -1136,6 +1177,13 @@ main(int argc, char *argv[])
             g_bios_path = argv[++i];
         } else if (strcmp(argv[i], "--vram-out") == 0 && i + 1 < argc) {
             vram_out = argv[++i];
+        } else if (strcmp(argv[i], "--frames-out") == 0 && i + 1 < argc) {
+            g_frames_dir = argv[++i];
+        } else if (strcmp(argv[i], "--frames-every") == 0 && i + 1 < argc) {
+            g_frames_every = (int)strtoul(argv[++i], NULL, 0);
+            if (g_frames_every < 1) g_frames_every = 1;
+        } else if (strcmp(argv[i], "--frames-from") == 0 && i + 1 < argc) {
+            g_frames_from = (uint32_t)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--load-addr") == 0 && i + 1 < argc) {
             load_addr = (uint32_t)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--pc") == 0 && i + 1 < argc) {
