@@ -16,19 +16,23 @@ thread, and a gdbserver). The remaining blockers, in priority order:
   suite over REF/PSX/CPUTest/GTE. NCLIP and AVSZ both PASS. Only those two ROMs
   are present locally; fetching the rest of the amidog GTE suite into REF/ to
   exercise RTPS/MVMVA/the lighting ops through conformance stays open.
-- [~] **P0: first-game bring-up.** Drive one concrete title from BIOS to
-  interactive gameplay. With GTE implemented, FF Tactics now boots the retail
-  BIOS from its mounted disc and reaches its title screen (logo, map art, and the
-  NEW GAME / CONTINUE / TUTORIAL / SOUND menu) by ~600M steps, then plays its
-  intro narrative sequence (screenshot assets/fft_title.png). The old
-  "stall at 0x8001DD34" was a pre-GTE artifact: that address is the game's own
-  attract/frame-wait loop, which it passes through normally once GTE answers its
-  geometry. Pad input now reaches FFT (the SIO0 ACK fix below): the title menu
-  responds to input (one Down moves the cursor to CONTINUE, a second to SOUND,
-  Cross selects). Remaining to prove the MVP: drive New Game all the way to the
-  tutorial battle (the opening is a long attract-looping cutscene, so it needs
-  carefully timed inputs, not blind mashing), chase the thin vertical RGB line
-  artifact over the intro map, then repeat with a second title.
+- [x] **P0: first-game bring-up.** Drive one concrete title from BIOS to
+  interactive gameplay. FF Tactics boots the retail BIOS from its mounted disc
+  and now reaches its first tactical battle from a cold boot under scripted
+  input. Progression: title screen (logo, map art, NEW GAME / CONTINUE /
+  TUTORIAL / SOUND menu) by ~600M steps; NEW GAME selected with Cross; opening
+  cutscene skipped to the name-entry screen; the default name "Ramza" and the
+  birthday accepted; the Orbonne Monastery dialogue skipped; the isometric
+  tutorial battle map by ~3.7B steps, with the GTE transforming the 3D
+  battlefield correctly. Screenshots: assets/fft_title.png,
+  assets/fft_orbonne_intro.png, assets/fft_tutorial_battle.png. Reproduce with
+  assets/fft_tutorial_battle.script. The old "stall at 0x8001DD34" was a pre-GTE
+  artifact: that address is the game's own attract/frame-wait loop, which it
+  passes through normally once GTE answers its geometry. Two input facts learned:
+  the SIO0 ACK fix below lets the BIOS see the pad, and FFT (USA) confirms
+  in-game dialogs with Circle and cancels with Cross (the title menu selects with
+  Cross). Still open: chase the thin vertical RGB line artifact over gameplay
+  maps, and repeat the bring-up with a second title.
 - [x] **P0: SIO0 ACK timing (fixed).** FFT reached the title but never responded
   to input, because it never advanced past selecting the pad (0x01) to the poll
   command (0x42). Disassembling the BIOS controller probe in RAM showed it writes
