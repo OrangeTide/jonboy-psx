@@ -30,6 +30,28 @@ psx_gpu_reset(void)
     gpu.disp_h = 240;
     gpu.disp_blank = 1; // the display is disabled until software enables it
     gpu.disp_24bpp = 0;
+    gpu.disp_range_y1 = 16;  // the standard NTSC 240-line active window
+    gpu.disp_range_y2 = 256;
+}
+
+// Visible height from the GP1(07) vertical range. In interlaced (480-line)
+// modes each programmed scanline covers two VRAM rows, so the count doubles. The
+// result never exceeds the mode height and falls back to it if the range is
+// empty or unset.
+int
+psx_gpu_active_height(void)
+{
+    int lines = gpu.disp_range_y2 - gpu.disp_range_y1;
+
+    if (lines <= 0) {
+        return gpu.disp_h;
+    }
+
+    if (gpu.disp_h > 240) {
+        lines *= 2;
+    }
+
+    return lines < gpu.disp_h ? lines : gpu.disp_h;
 }
 
 // Decode a GP1(08) display-mode word into the on-screen resolution.
@@ -1043,7 +1065,11 @@ psx_gpu_send_command_gp1(uint32_t value)
         break;
 
     case 0x06: // Horizontal display range (screen timing, not output size)
-    case 0x07: // Vertical display range (screen timing, not output size)
+        break;
+
+    case 0x07: // Vertical display range: the scanlines the picture occupies.
+        gpu.disp_range_y1 = value & 0x3FF;
+        gpu.disp_range_y2 = (value >> 10) & 0x3FF;
         break;
 
     case 0x08: // Display mode (resolution and color depth)
