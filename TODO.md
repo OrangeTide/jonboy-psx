@@ -254,6 +254,14 @@ Next up (in order):
   expected. This covers the six-block assembly, chroma subsampling, and the
   YCbCr-to-RGB conversion. `run_boot` prints an MDEC decode-command and
   macroblock tally (`mdec_get_stats`) so an FMV run shows a rising colour count.
+- `test_mdec.c` also carries a byte-exact colour pin: it feeds an aggressive
+  six-block macroblock (many AC terms, saturating levels, high zig-zag indices)
+  through the real decoder and diffs both the 24- and 15-bit output against a
+  reference pipeline transcribed independently from the mednafen/Beetle MDEC
+  (dequant, YCbCr, and the RGB555 uint8 truncation). This exercises the AC path
+  the DC-only checks miss and locks the decoder to the hardware-faithful result.
+  All six blocks use a nonzero q_scale; the raw q_scale == 0 path stays covered
+  by the amidog ROMs.
 - Still pending: a real game FMV through the whole pipeline (CD stream to MDEC to
   GPU). Lunar Silver Star Story now boots past its old timer stall (see the timer
   clock-source fix), renders the copyright screen, and streams its intro FMV off
