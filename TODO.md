@@ -59,9 +59,11 @@ thread, and a gdbserver). The remaining blockers, in priority order:
   mode size, and both present and the headless dump use them. Chrono Trigger sets
   the horizontal range to exactly the mode width, so the visible horizontal change
   was only in the headless dump (it had hardcoded 320 columns). The "thin vertical
-  RGB line over FFT maps" is likely a separate artifact and still needs its own
-  diagnosis (FFT's title uses a full-width range; its gameplay range is
-  unconfirmed).
+  RGB line over FFT maps" turned out to be the same GP1(06) issue and is fixed too:
+  FFT's title uses a full-width (320) range, but its gameplay maps and battles use
+  a 256-wide range, so the old code presented 64 columns of stale texture VRAM down
+  the right edge. Honoring the horizontal range blacks that border (verified on the
+  Orbonne cutscene map and the tutorial battle).
 - [ ] **P1: timer/IRQ accuracy** sufficient for the sync/target modes games gate
   on (root counters exist; confirm against the first-game stall).
 
