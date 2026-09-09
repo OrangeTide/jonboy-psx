@@ -35,9 +35,9 @@ conformance : $(BINDIR)/jonboy
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test mdec-oracle
+.PHONY: all clean clean-all run fmt conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test mdec-oracle
 ## jonboy
-EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c inject.c main.c mc.c mdec.c mem.c pad.c psio.c rom.c sched.c script.c spu.c timer.c vram.c xa.c
+EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c gte.c inject.c main.c mc.c mdec.c mem.c pad.c psio.c rom.c sched.c script.c spu.c timer.c vram.c xa.c
 all :: $(BINDIR)/jonboy
 clean ::
 	$(RM) $(BINDIR)/jonboy
@@ -59,9 +59,9 @@ $(BINDIR)/jonboy.c : $(EMU_SRC) $(wildcard *.h) tools/amalgamate.awk | $(BINDIR)
 $(BINDIR)/jonboy-amalg : $(BINDIR)/jonboy.c | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) $(shell pkg-config --cflags sdl3) $< -lpthread $(shell pkg-config --libs sdl3)
 ## host unit tests (built without SDL: cdrom.c/spu.c with stub globals)
-all :: $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader $(BINDIR)/test_pad $(BINDIR)/test_script $(BINDIR)/test_mdec
+all :: $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader $(BINDIR)/test_pad $(BINDIR)/test_script $(BINDIR)/test_mdec $(BINDIR)/test_gte
 clean ::
-	$(RM) $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader $(BINDIR)/test_pad $(BINDIR)/test_script $(BINDIR)/test_mdec
+	$(RM) $(BINDIR)/test_cdda $(BINDIR)/test_spu $(BINDIR)/test_xa $(BINDIR)/test_mc $(BINDIR)/test_loader $(BINDIR)/test_pad $(BINDIR)/test_script $(BINDIR)/test_mdec $(BINDIR)/test_gte
 $(BINDIR)/test_cdda : test_cdda.c cdrom.c xa.c cdrom.h cpu.h mem.h spu.h xa.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_cdda.c cdrom.c xa.c -lpthread
 $(BINDIR)/test_spu : test_spu.c spu.c spu.h cpu.h lebytes.h | $(BINDIR)
@@ -78,6 +78,8 @@ $(BINDIR)/test_script : test_script.c script.c script.h pad.h cdrom.h | $(BINDIR
 	$(CC) -o $@ $(CFLAGS) test_script.c script.c
 $(BINDIR)/test_mdec : test_mdec.c mdec.c mdec.h | $(BINDIR)
 	$(CC) -o $@ $(CFLAGS) test_mdec.c mdec.c
+$(BINDIR)/test_gte : test_gte.c gte.c gte.h | $(BINDIR)
+	$(CC) -o $@ $(CFLAGS) test_gte.c gte.c
 cdda-test : $(BINDIR)/test_cdda
 	./$(BINDIR)/test_cdda
 spu-test : $(BINDIR)/test_spu
@@ -94,6 +96,8 @@ script-test : $(BINDIR)/test_script
 	./$(BINDIR)/test_script
 mdec-test : $(BINDIR)/test_mdec
 	./$(BINDIR)/test_mdec
+gte-test : $(BINDIR)/test_gte
+	./$(BINDIR)/test_gte
 
 # Byte-exact cross-check of the MDEC decoder against the real mednafen/Beetle
 # mdec.c. That source is not part of this repository; fetch it under

@@ -1,5 +1,6 @@
 #include "cpu.h"
 #include "decode.h"
+#include "gte.h"
 #include "mem.h"
 #include "sched.h"
 #include <stdint.h>
@@ -22,6 +23,7 @@ cpu_reset(uint32_t start_pc)
     cpu = fresh;
     cpu.PC = start_pc;
     cpu.next_pc = start_pc + 4;
+    gte_reset();
     psx_hardware_reset();
 }
 
@@ -148,8 +150,10 @@ delay_slot_dest(uint32_t opcode, uint32_t funct, uint32_t rs,
         return 31;
     case 0x10: // COP0: MFC0 writes rt immediately
         return (rs == 0x00) ? rt : 0;
+    case 0x12: // COP2: MFC2 (rs 0) and CFC2 (rs 2) write rt immediately
+        return (rs == 0x00 || rs == 0x02) ? rt : 0;
     default:
-        // Stores, branches, COP2, etc. do not clobber a pending load.
+        // Stores, branches, and LWC2/SWC2 do not clobber a pending load.
         return 0;
     }
 }
@@ -570,6 +574,31 @@ step_cpu(void)
     }
     break;
 
+    case 0x12: { // COP2 (GTE): move ops, or a command when bit 25 is set
+        if (inst & 0x02000000u) {
+            // GTE command: the low 25 bits select the operation and its flags.
+            gte_execute(inst & 0x01FFFFFFu);
+        } else {
+            switch (rs) {
+            case 0x00: // MFC2: cop2 data register rd -> CPU rt
+                if (rt != 0) cpu.regs[rt] = gte_read_data(rd);
+                break;
+            case 0x02: // CFC2: cop2 control register rd -> CPU rt
+                if (rt != 0) cpu.regs[rt] = gte_read_control(rd);
+                break;
+            case 0x04: // MTC2: CPU rt -> cop2 data register rd
+                gte_write_data(rd, cpu.regs[rt]);
+                break;
+            case 0x06: // CTC2: CPU rt -> cop2 control register rd
+                gte_write_control(rd, cpu.regs[rt]);
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    break;
+
     // ---- LOADS (result appears after the following instruction) ----
     case 0x20: // LB (sign-extended byte)
         if (rt != 0) {
@@ -738,6 +767,30 @@ step_cpu(void)
 
         if (!cache_isolated()) {
             memory_write_word(aligned, val);
+        }
+    }
+    break;
+
+    case 0x32: { // LWC2: load a word into cop2 data register rt
+        uint32_t addr = cpu.regs[rs] + imm_se;
+
+        if (addr & 3) {
+            cpu.cp0_regs[CP0_REG_BADVADDR] = addr;
+            raise_exception(EXC_ADEL);
+        } else {
+            gte_write_data(rt, memory_read_word(addr));
+        }
+    }
+    break;
+
+    case 0x3A: { // SWC2: store cop2 data register rt to memory
+        uint32_t addr = cpu.regs[rs] + imm_se;
+
+        if (addr & 3) {
+            cpu.cp0_regs[CP0_REG_BADVADDR] = addr;
+            raise_exception(EXC_ADES);
+        } else if (!cache_isolated()) {
+            memory_write_word(addr, gte_read_data(rt));
         }
     }
     break;

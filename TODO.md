@@ -344,12 +344,18 @@ Register file (to add to R3051_CPU in cpu.h):
   register.
 
 Plan:
-- [ ] register file + the flag register in cpu.h, zeroed on reset.
-- [ ] move and load/store ops in cpu.c: MFC2, CFC2, MTC2, CTC2 (primary opcode
-  0x12 sub-ops), and LWC2 (0x32) / SWC2 (0x3A). Respect the load-delay model the
-  rest of the CPU uses. Some cop2 data registers read back differently from what
-  was written (SXYP mirror, IRGB/ORGB, the sign-extended/truncated ones), so the
-  move ops need the per-register read/write quirks, not a flat array copy.
+- [x] register file + the flag register (gte.c / gte.h, GTE struct), zeroed on
+  reset via gte_reset from cpu_reset. The data and control banks and their
+  read/write accessors carry the hardware read-back quirks: sign-extension on the
+  VZ/IR/RT33-class registers, the SXYP FIFO push, the IRGB/ORGB colour
+  conversion, the LZCS/LZCR leading count, the H sign-extend quirk, and the FLAG
+  bit-12..30 mask with the bit-31 error summary. Unit tested (test_gte.c, `make
+  gte-test`).
+- [x] move and load/store ops in cpu.c: MFC2, CFC2, MTC2, CTC2 (primary opcode
+  0x12 sub-ops), and LWC2 (0x32) / SWC2 (0x3A). MFC2/CFC2 write rt immediately,
+  matching this core's MFC0 treatment (the hardware load delay on these is not
+  modeled, same as MFC0); LWC2/SWC2 check word alignment and raise ADEL/ADES. A
+  COP2 command instruction (bit 25 set) routes to gte_execute.
 - [ ] the command ops (COP2 with bit 25 set, selected by the low function bits),
   with the shared MAC/IR pipeline, the per-op shift (sf), the lm saturation flag,
   and the FLAG bits: RTPS/RTPT (perspective transform, the depth-cue and the SZ/SXY
