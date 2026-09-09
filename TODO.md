@@ -23,26 +23,25 @@ thread, and a gdbserver). The remaining blockers, in priority order:
   intro narrative sequence (screenshot assets/fft_title.png). The old
   "stall at 0x8001DD34" was a pre-GTE artifact: that address is the game's own
   attract/frame-wait loop, which it passes through normally once GTE answers its
-  geometry. Remaining to prove the MVP: pad input does not reach FFT (see the SIO0
-  ACK item below), so a scripted New Game cannot be confirmed yet; also chase the
-  thin vertical RGB line artifact over the intro map, then repeat with a second
-  title.
-- [ ] **P0: SIO0 ACK timing blocks BIOS-driven pad input.** FFT reaches the title
-  but never responds to input. Diagnosed with instrumentation: the loader menu
-  (direct JOY_STAT polling) responds to scripted input, so the script plumbing is
-  fine, but FFT selects the pad (writes 0x01 to JOY_TX ~3600 times) and never
-  sends the command byte (0x42). It polls JOY_STAT (~2 reads per attempt), never
-  sees the ACK bit (bit 9), aborts, and retries about once per frame. IRQ_PAD is
-  masked, so it is not using the pad interrupt either. Root cause: pad.c raises
-  RX-ready synchronously on the JOY_TX write but delays the ACK by
-  SIO_ACK_DELAY_CYCLES (100); on hardware both appear together after the byte
-  shifts. FFT waits for RX-ready (instant), checks the ACK once (not yet fired),
-  sees no device, and gives up. Fix: put RX-ready / the response byte on the same
-  delayed schedule as the ACK (model the byte-shift latency) so a poll for
-  RX-ready then ACK observes both, while keeping the clear-then-wait drivers
-  (memory card, loader) working. Must keep pad-test and mc-test green. This is
-  almost certainly the real gate on interactive gameplay in most commercial
-  titles.
+  geometry. Pad input now reaches FFT (the SIO0 ACK fix below): the title menu
+  responds to input (one Down moves the cursor to CONTINUE, a second to SOUND,
+  Cross selects). Remaining to prove the MVP: drive New Game all the way to the
+  tutorial battle (the opening is a long attract-looping cutscene, so it needs
+  carefully timed inputs, not blind mashing), chase the thin vertical RGB line
+  artifact over the intro map, then repeat with a second title.
+- [x] **P0: SIO0 ACK timing (fixed).** FFT reached the title but never responded
+  to input, because it never advanced past selecting the pad (0x01) to the poll
+  command (0x42). Disassembling the BIOS controller probe in RAM showed it writes
+  the address byte, spins a fixed delay, clears both the SIO0 interrupt and the
+  I_STAT pad-interrupt bit, then polls I_STAT for the acknowledge to reappear, and
+  treats the port as empty unless it does. The acknowledge delay was 100 cycles,
+  which fired it during the pre-clear spin, so the clear wiped it and every probe
+  read no controller. Raised SIO_ACK_DELAY_CYCLES to 500, past the clear (which
+  lands a few hundred cycles after the byte) and well within the probe's ~1800
+  cycle timeout, matching hardware where the acknowledge trails the byte by about
+  the baud period. The loader menu polls the port directly rather than through the
+  BIOS probe, so it was never affected. pad-test, mc-test, the self tests, and the
+  amalgamation stay green.
 - [ ] **P1: GPU residuals once GTE lands.** Dithering (absent) and the mask bit /
   GP0(0xE6) set-mask/check-mask (absent). Minor visually but affect correctness on
   real scenes. The rest of the GPU (textures, CLUT, clip, offset, all four
