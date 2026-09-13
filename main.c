@@ -131,6 +131,33 @@ static const char *g_script_path = NULL;     // timed system-event script file
 // step_cpu call advances two cycles, so a frame is half that many steps.
 #define STEPS_PER_FRAME (564480 / 2)
 
+// Emulated wall-clock seconds represented by a step count: at the target frame
+// rate, STEPS_PER_FRAME steps is one 60th of a second of console time.
+static double
+emulated_seconds(uint64_t steps)
+{
+    return (double)steps / (double)STEPS_PER_FRAME / (double)TARGET_FPS;
+}
+
+// The interpreter-versus-real-time metric for the unpaced run modes (headless,
+// exe, boot). These loops run as fast as the host allows, so comparing the
+// console time they cover against the wall time they took is a direct real-time
+// ratio: 1.0x is exactly real-time, above is headroom, below cannot keep up.
+// This is the number to track across optimizations and across hosts (desktop
+// versus Pi 3/4/5).
+static void
+report_realtime(uint64_t steps, uint64_t start_counter)
+{
+    double freq = (double)SDL_GetPerformanceFrequency();
+    double wall = (double)(SDL_GetPerformanceCounter() - start_counter) / freq;
+    double emu = emulated_seconds(steps);
+    double ratio = wall > 0.0 ? emu / wall : 0.0;
+    double mips = wall > 0.0 ? (double)steps / wall / 1e6 : 0.0;
+
+    printf("Perf: %.2fs console time in %.2fs wall = %.2fx real-time "
+           "(%.1fM steps/s)\n", emu, wall, ratio, mips);
+}
+
 int SDLCALL jonboy_runapp(int argc, char *argv[]);
 
 // Shell entry point: the BIOS reaches it once the kernel is fully initialized.
@@ -264,6 +291,12 @@ static struct {
 // main thread entirely: a blocked event pump or slow present cannot starve it.
 #define AUDIO_RATE 44100
 
+// Audio-dropout metric: the audio device pulls a fixed number of frames each
+// callback. When the SPU ring cannot supply them all, the device gets silence
+// and the player hears a gap. Each such short callback counts one underrun; the
+// perf HUD in the emu thread reports and clears the count once a second.
+static SDL_AtomicInt g_audio_underruns;
+
 static void SDLCALL
 audio_callback(void *userdata, SDL_AudioStream *stream, int additional, int total)
 {
@@ -273,7 +306,8 @@ audio_callback(void *userdata, SDL_AudioStream *stream, int additional, int tota
     // Feed only what the device asked for. The SPU ring bounds how far ahead
     // emulation can run; if it is empty (an underrun) we simply hand over less,
     // and SDL fills the gap with silence.
-    int frames = additional / (int)(2 * sizeof(int16_t));
+    int requested = additional / (int)(2 * sizeof(int16_t));
+    int frames = requested;
     int16_t buf[1024 * 2];
 
     while (frames > 0) {
@@ -285,6 +319,11 @@ audio_callback(void *userdata, SDL_AudioStream *stream, int additional, int tota
         SDL_PutAudioStreamData(stream, buf, n * 2 * (int)sizeof(int16_t));
         frames -= n;
     }
+
+    // The ring ran dry before the device's request was met: one dropout event.
+    if (frames > 0) {
+        SDL_AddAtomicInt(&g_audio_underruns, 1);
+    }
 }
 
 // Emu thread: transpose the column-major VRAM into its private snapshot buffer
@@ -294,13 +333,14 @@ audio_callback(void *userdata, SDL_AudioStream *stream, int additional, int tota
 static void
 publish_frame(AppContext *app)
 {
-    uint16_t *dst = g_frame_buf[app->produce_idx];
-    for (int y = 0; y < VRAM_HEIGHT; y++) {
-        uint16_t *row = &dst[(size_t)y * VRAM_WIDTH];
-        for (int x = 0; x < VRAM_WIDTH; x++) {
-            row[x] = vram.canvas[x][y];
-        }
-    }
+    // Publish a raw column-major snapshot of VRAM. vram.canvas is
+    // uint16_t[VRAM_WIDTH][VRAM_HEIGHT] and contiguous, so this is one flat copy.
+    // The expensive transpose to row-major for display is deferred to the main
+    // thread in present_frame, which is vsync-limited and has spare time. That
+    // keeps ~1.3 ms per frame of transpose off the emulation thread's real-time
+    // budget, which is what the audio ring depends on staying ahead of.
+    memcpy(g_frame_buf[app->produce_idx], vram.canvas,
+           (size_t)VRAM_WIDTH * VRAM_HEIGHT * sizeof(uint16_t));
 
     g_frame_meta[app->produce_idx].dx = gpu.disp_x;
     g_frame_meta[app->produce_idx].dy = gpu.disp_y;
@@ -336,11 +376,23 @@ present_frame(AppContext *app)
     SDL_RenderClear(app->renderer);
 
     if (app->have_frame) {
+        // The published buffer is a column-major VRAM snapshot (snap[x*H + y]).
+        // Transpose it to row-major here, on the main thread, so the emu thread
+        // does not pay for it. The display paths below read this row-major copy.
+        static uint16_t rowmajor[VRAM_HEIGHT * VRAM_WIDTH];
+        const uint16_t *snap = g_frame_buf[app->consume_idx];
+        for (int y = 0; y < VRAM_HEIGHT; y++) {
+            uint16_t *row = &rowmajor[(size_t)y * VRAM_WIDTH];
+            for (int x = 0; x < VRAM_WIDTH; x++) {
+                row[x] = snap[(size_t)x * VRAM_HEIGHT + y];
+            }
+        }
+
         void *pixels;
         int pitch;
         if (SDL_LockTexture(app->vram_texture, NULL, &pixels, &pitch)) {
             uint8_t *dst = pixels;
-            const uint16_t *src = g_frame_buf[app->consume_idx];
+            const uint16_t *src = rowmajor;
             for (int y = 0; y < VRAM_HEIGHT; y++) {
                 memcpy(dst + (size_t)y * pitch,
                        &src[(size_t)y * VRAM_WIDTH],
@@ -370,7 +422,7 @@ present_frame(AppContext *app)
             if (dh > VRAM_HEIGHT) dh = VRAM_HEIGHT;
             SDL_Rect area = { 0, 0, dw, dh };
             if (SDL_LockTexture(app->disp24_texture, &area, &pixels, &pitch)) {
-                const uint16_t *src = g_frame_buf[app->consume_idx];
+                const uint16_t *src = rowmajor;
                 for (int y = 0; y < dh; y++) {
                     const uint16_t *row = &src[(size_t)((dy + y) & 0x1FF) * VRAM_WIDTH];
                     uint8_t *out = (uint8_t *)pixels + (size_t)y * pitch;
@@ -408,10 +460,26 @@ emu_thread(void *data)
     int kernel_up = 0;
     int sideloaded = 0;
 
+    // The loader/sideload service only ever acts when a sideload EXE or a loader
+    // games directory is configured. For a plain BIOS or disc boot neither is,
+    // so skip the per-step call entirely and pay only a predicted branch. This
+    // keeps two function calls per instruction off the emulation thread.
+    int service_active = (g_sideload_exe != NULL) || (g_games_dir != NULL);
+
     uint64_t last_time = SDL_GetPerformanceCounter();
     double accumulator = 0.0;
     double time_bridge = 1.0 / TARGET_FPS;
     double counts_per_sec = (double)SDL_GetPerformanceFrequency();
+
+    // Live real-time metric (JONBOY_PERF=1). busy_acc is the wall time spent
+    // actually running instructions; comparing it to the wall time that elapsed
+    // gives the fraction of the real-time budget the interpreter consumes. Below
+    // 100% there is headroom; at 100% with fewer than 60 emulated frames the core
+    // is saturated and audio underruns follow.
+    int perf_hud = getenv("JONBOY_PERF") != NULL;
+    uint64_t report_last = last_time;
+    double busy_acc = 0.0;
+    int frames_acc = 0;
 
     while (SDL_GetAtomicInt(&app->running)) {
         uint64_t now = SDL_GetPerformanceCounter();
@@ -424,22 +492,43 @@ emu_thread(void *data)
         }
 
         int ran = 0;
+        uint64_t busy_start = SDL_GetPerformanceCounter();
         while (accumulator >= time_bridge && SDL_GetAtomicInt(&app->running)) {
             for (uint32_t step = 0; step < STEPS_PER_FRAME; step++) {
                 if (cpu.halted) {
                     break;
                 }
-                service_loader_boot(&kernel_up, &sideloaded);
+                if (service_active) {
+                    service_loader_boot(&kernel_up, &sideloaded);
+                }
                 step_cpu();
             }
             accumulator -= time_bridge;
+            frames_acc++;
             ran = 1;
         }
 
         // Publish once per outer pass, showing the latest state rather than every
-        // caught-up frame that would never be seen.
+        // caught-up frame that would never be seen. Publishing is counted in the
+        // busy time below so the real-time budget figure reflects every piece of
+        // work the emulation thread does, not just instruction execution.
         if (ran) {
             publish_frame(app);
+            busy_acc += (double)(SDL_GetPerformanceCounter() - busy_start) / counts_per_sec;
+        }
+
+        if (perf_hud) {
+            double since = (double)(last_time - report_last) / counts_per_sec;
+            if (since >= 1.0) {
+                double load = busy_acc / since * 100.0;
+                int underruns = SDL_GetAtomicInt(&g_audio_underruns);
+                SDL_SetAtomicInt(&g_audio_underruns, 0);
+                SDL_Log("[perf] %d fps emulated, %.0f%% of real-time budget, "
+                        "audio underruns/s: %d", frames_acc, load, underruns);
+                report_last = last_time;
+                busy_acc = 0.0;
+                frames_acc = 0;
+            }
         }
         SDL_Delay(1);
     }
@@ -744,6 +833,7 @@ run_headless(const char *path, uint32_t load_addr, uint32_t start_pc,
     cpu.halt_on_break = 1; // let a test use BREAK to stop and report
 
     uint64_t steps = 0;
+    uint64_t start_counter = SDL_GetPerformanceCounter();
 
     while (!cpu.halted && steps < max_steps) {
         step_cpu(); // interrupts are recognized inside step_cpu
@@ -756,6 +846,8 @@ run_headless(const char *path, uint32_t load_addr, uint32_t start_pc,
         printf("\nStep limit reached after %llu steps (no halt).\n",
                (unsigned long long)steps);
     }
+
+    report_realtime(steps, start_counter);
 
     dump_registers();
     dump_memory(load_addr, 16);
@@ -932,6 +1024,7 @@ run_exe(const char *path, uint64_t max_steps, const char *vram_out)
            path, pc, gp, sp, (unsigned long long)max_steps);
 
     uint64_t steps = 0;
+    uint64_t start_counter = SDL_GetPerformanceCounter();
 
     while (!cpu.halted && steps < max_steps) {
         step_cpu();
@@ -939,6 +1032,7 @@ run_exe(const char *path, uint64_t max_steps, const char *vram_out)
     }
 
     printf("Ran %llu steps (PC=0x%08X).\n", (unsigned long long)steps, cpu.PC);
+    report_realtime(steps, start_counter);
 
     int green = 0, red = 0;
     classify_results(&green, &red);
@@ -1014,15 +1108,27 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
     // the PS-EXE over RAM and jump to its entry, so it runs with a live BIOS.
     int sideloaded = 0;
     int kernel_up = 0; // set once the BIOS reaches the shell entry point
+    uint64_t start_counter = SDL_GetPerformanceCounter();
+
+    // Skip the per-step loader/sideload service and the frame-dump check when
+    // neither is configured, so a plain boot pays only a predicted branch per
+    // instruction instead of two function calls.
+    int service_active = (g_sideload_exe != NULL) || (g_games_dir != NULL);
+    int dumping = (g_frames_dir != NULL);
 
     while (!cpu.halted && steps < max_steps) {
-        service_loader_boot(&kernel_up, &sideloaded);
+        if (service_active) {
+            service_loader_boot(&kernel_up, &sideloaded);
+        }
         step_cpu();
         steps++;
-        maybe_dump_frame(steps);
+        if (dumping) {
+            maybe_dump_frame(steps);
+        }
     }
 
     printf("Ran %llu steps.\n", (unsigned long long)steps);
+    report_realtime(steps, start_counter);
     dump_registers();
     // Show the instructions around where execution ended, to spot poll loops.
     dump_memory((cpu.PC - 16) & ~0xFu, 8);
