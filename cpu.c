@@ -164,29 +164,60 @@ step_cpu(void)
     // Advance hardware time first so a VBLANK or timer interrupt raised this
     // step is recognized at the boundary check just below. The scheduler only
     // runs the device fan-out when an event is due, not on every step.
-    psx_hardware_advance(CPU_CYCLES_PER_STEP);
+    //
+    // PROTOTYPE (JONBOY_FASTTICK=N): the per-instruction hardware tick and
+    // interrupt check are the largest fixed per-instruction cost after the
+    // instruction itself. Batching them to every N-th instruction (a proxy for a
+    // block-cached interpreter that ticks at block boundaries) advances the same
+    // total cycles in bulk, so timing stays correct, but coarsens interrupt
+    // latency by up to N-1 instructions. Default (N unset / 0) keeps the exact
+    // per-instruction behavior, so headless determinism and conformance are
+    // unchanged unless the mode is explicitly enabled.
+    static int fast_n = -1;
 
-    // ---- RECOGNIZE PENDING INTERRUPTS ----
-    // Interrupts are taken at instruction boundaries, before fetching the next
-    // instruction, so EPC names the instruction that has not run yet.
-    if (interrupt_pending()) {
-        // A load started by the previous instruction still writes back before
-        // the interrupt is serviced. The delay-slot instruction that would have
-        // run next does not execute, so nothing can override the load; commit it
-        // here. Dropping it would leave the target register with its old value
-        // and silently corrupt state (a copy loop interrupted right after a load
-        // would store the wrong word).
-        if (cpu.load_reg != 0) {
-            cpu.regs[cpu.load_reg] = cpu.load_val;
-            cpu.load_reg = 0;
-            cpu.load_val = 0;
-            cpu.regs[0] = 0;
+    if (fast_n < 0) {
+        const char *e = getenv("JONBOY_FASTTICK");
+        fast_n = e ? atoi(e) : 0;
+        if (fast_n < 1) {
+            fast_n = 0;
         }
+    }
 
-        cpu.current_pc = cpu.PC;
-        cpu.in_delay_slot = cpu.branch_taken; // the pending instruction is a slot
-        raise_exception(EXC_INT);
-        return;
+    static unsigned tick_batch = 0;
+    int do_tick = 1;
+
+    if (fast_n) {
+        do_tick = (++tick_batch >= (unsigned)fast_n);
+        if (do_tick) {
+            tick_batch = 0;
+        }
+    }
+
+    if (do_tick) {
+        psx_hardware_advance(CPU_CYCLES_PER_STEP * (fast_n ? (uint32_t)fast_n : 1u));
+
+        // ---- RECOGNIZE PENDING INTERRUPTS ----
+        // Interrupts are taken at instruction boundaries, before fetching the
+        // next instruction, so EPC names the instruction that has not run yet.
+        if (interrupt_pending()) {
+            // A load started by the previous instruction still writes back before
+            // the interrupt is serviced. The delay-slot instruction that would
+            // have run next does not execute, so nothing can override the load;
+            // commit it here. Dropping it would leave the target register with its
+            // old value and silently corrupt state (a copy loop interrupted right
+            // after a load would store the wrong word).
+            if (cpu.load_reg != 0) {
+                cpu.regs[cpu.load_reg] = cpu.load_val;
+                cpu.load_reg = 0;
+                cpu.load_val = 0;
+                cpu.regs[0] = 0;
+            }
+
+            cpu.current_pc = cpu.PC;
+            cpu.in_delay_slot = cpu.branch_taken; // the pending instr is a slot
+            raise_exception(EXC_INT);
+            return;
+        }
     }
 
     // The instruction about to execute is at cpu.PC. It sits in a delay slot if
