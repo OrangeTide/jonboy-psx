@@ -530,15 +530,29 @@ static and a slight pitch drop. Target: real-time on a Pi 5, near real-time on P
   pack out of the pixel loop; skip the texture-window transform when unset) were
   proven pixel-identical but measured immaterial for FFT (0.13% headless), so they
   were not kept. Would only help 2D/sprite-heavy games.
-- [ ] cached interpreter / dynarec. The remaining desktop headroom needs a
-  different class of change, not micro-opts. A cached interpreter (decode each
-  basic block once, skip re-fetch/re-decode, and batch the per-instruction
-  hardware tick and interrupt check to block boundaries) is the balance-of-effort
-  option; a dynarec is the ceiling. Note prior dead ends: threaded/computed-goto
-  dispatch and per-instruction lookup tables both measured slower on this box, so
-  the win must come from removing per-instruction work (fetch, decode, hw tick),
-  not from changing dispatch. See the tick-batching ceiling measurement before
-  committing to the full block cache.
+- [x] cached-interpreter prototype: located the win and proved it. A literal
+  decode/micro-op cache is not worth building here (decode.h is trivial
+  field-extraction macros, so decode is nearly free, and threaded/computed-goto
+  dispatch and per-instruction lookup tables both already measured slower). The
+  only real lever in that family is batching the per-instruction hardware tick and
+  interrupt check to block granularity. Prototyped as `JONBOY_FASTTICK=N` in
+  step_cpu (cpu.c), gated and default-off: it advances N*cycles in bulk every N-th
+  instruction so total timing stays exact and only interrupt latency coarsens by
+  up to N-1. Unset/0 keeps exact per-instruction behavior, so determinism and
+  conformance are unchanged by default. N=6 measured +12% on the CPU-bound BIOS
+  phase (26.4M -> 29.5M steps/s) but only +2.7% on the full FFT boot-to-battle,
+  since the battle is bound by GPU/GTE/MDEC and real instruction work, not
+  per-instruction overhead. Validated: conformance passes, FFT boots to the
+  battle, and the final battle frame is bit-identical to the default build.
+- [ ] evaluate JONBOY_FASTTICK on the Pi 3/4/5. Per-instruction overhead and the
+  scheduler flush's memory latency are a larger share of the budget on a slower
+  in-order CPU, so tick-batching should help more there than on desktop. Sweep
+  N=4/6/8 against the baseline `Perf:` ratio. If it pays off, productize it as
+  ticking at true branch boundaries rather than modulo-N.
+- [ ] dynarec (the ceiling, large effort). The remaining desktop in-game headroom
+  needs native code generation, not interpreter micro-opts; keep it portable C
+  (hand-rolled emitter, no C++ JIT library) so the amalgamation and determinism
+  story survive. See the design notes discussed for the x86-64 / AArch64 targets.
 
 ## Debugging
 
