@@ -472,9 +472,10 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
   single-threaded internally, so it remains deterministic, and the headless,
   --boot, and --exe modes keep their own single-threaded loops (unchanged;
   reference traces and conformance unaffected). Seams: the emu thread publishes a
-  linear VRAM snapshot at end of frame under frame_lock (transposed off-lock into
-  a private buffer, so the lock covers one memcpy); the main thread uploads that
-  and presents, paced by vsync. Input is the pad globals the main thread writes
+  raw column-major VRAM snapshot at end of frame (one flat memcpy into a triple
+  buffer); the main thread transposes it to row-major and presents, paced by
+  vsync. The transpose was moved off the emu thread deliberately (see
+  Performance) so it does not spend the real-time budget the audio ring needs. Input is the pad globals the main thread writes
   and the emu thread reads (single words, a torn read is harmless). Audio is
   pushed from the emu thread straight to the SDL stream, whose own callback thread
   drains it, so it keeps playing through a main-thread stall. Shutdown sets an
@@ -495,6 +496,49 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
     C11 atomics with release/acquire ordering (no SDL dependency added), so the
     reader sees a frame's samples before the advanced write index. On an underrun
     the callback feeds less and SDL pads with silence.
+
+## Performance
+
+The desktop core runs above real time on average but the windowed build can dip
+below it in heavy scenes, which starves the SPU output ring and produces audible
+static and a slight pitch drop. Target: real-time on a Pi 5, near real-time on Pi
+3/4; desktop is the development platform.
+
+- [x] real-time metric, two halves (main.c). Batch: `report_realtime()` prints
+  `Perf: <console>s in <wall>s = <N>x real-time` at the end of every
+  headless/exe/boot run. This is the trustworthy A/B number (unpaced, controlled).
+  Live: `JONBOY_PERF=1` logs once a second from the emu thread `[perf] <fps>
+  emulated, <P>% of real-time budget, audio underruns/s: <U>`, where P% is
+  emu-thread busy time (step loop + publish) over wall time and U counts audio
+  callbacks the SPU ring could not fill. Caveat: the live P% has ~5-10% run-to-run
+  variance from background CPU load, so use the headless ratio for A/B and run any
+  windowed A/B back to back with nothing else running.
+- [x] move the VRAM transpose off the emu thread. publish_frame now memcpys a raw
+  column-major snapshot (~0.09 ms); present_frame does the ~1.29 ms/frame
+  transpose on the main thread, which is vsync limited and has spare budget.
+  Provably pixel-identical. This pulled heavy scenes back under the real-time line.
+- [x] gate per-instruction bookkeeping calls. service_loader_boot and
+  maybe_dump_frame were called on every instruction in the run loops; gating them
+  behind a loop-invariant flag (inactive for a plain BIOS/disc boot) bought ~16%
+  on the CPU-bound BIOS phase (300M-step boot 23.8M -> 27.6M steps/s).
+- [ ] triangle rasterizer: investigated, NOT a fruitful target for FFT. draw_triangle
+  is ~17% in profiles but already well-optimized. Measured coverage ratio 0.443
+  (56% of inner-loop iterations fall outside the triangle), but those iterations
+  are cheap next to covered textured pixels, so a scanline/span rewrite is
+  estimated ~4% at most and cannot stay bit-exact for gouraud/textured (float
+  accumulation rounds differently). Two bit-exact micro-opts (hoist the flat-color
+  pack out of the pixel loop; skip the texture-window transform when unset) were
+  proven pixel-identical but measured immaterial for FFT (0.13% headless), so they
+  were not kept. Would only help 2D/sprite-heavy games.
+- [ ] cached interpreter / dynarec. The remaining desktop headroom needs a
+  different class of change, not micro-opts. A cached interpreter (decode each
+  basic block once, skip re-fetch/re-decode, and batch the per-instruction
+  hardware tick and interrupt check to block boundaries) is the balance-of-effort
+  option; a dynarec is the ceiling. Note prior dead ends: threaded/computed-goto
+  dispatch and per-instruction lookup tables both measured slower on this box, so
+  the win must come from removing per-instruction work (fetch, decode, hw tick),
+  not from changing dispatch. See the tick-batching ceiling measurement before
+  committing to the full block cache.
 
 ## Debugging
 
