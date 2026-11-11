@@ -524,7 +524,7 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
 
     // GPU Commands (GP0 / GP1)
     case 0x1810:
-        psx_gpu_send_command_gp0(value);
+        gpu_submit_gp0(value);
         break;
 
     case 0x1814:

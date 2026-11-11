@@ -247,15 +247,34 @@ thread, with fences where the CPU looks at the result.
    cross-thread points, VRAM touched in three files only, no drawing-state read
    crosses the boundary outside the register functions.
 3. Add the command ring and the worker, behind a flag, running the existing GP0
-   handler. No fences yet; validate on draw-only, no-readback content.
-4. Add the readback fence (point 1 and 2). Validate the differential test on a
-   readback-heavy workload.
-5. Move the present snapshot to the worker (point 3). Validate no tearing and
-   correct frames.
-6. Handle GP1 reset and FIFO-clear ordering (point 5), and the GPUSTAT busy bit
-   only if a title needs it (point 4).
-7. Measure the emulation-thread budget drop in `--bench` against the step 0
-   baseline, and the windowed `JONBOY_PERF` HUD under a heavy scene. Record both.
+   handler. Done, and it folds in the drain fences rather than shipping a racy
+   intermediate: the GP0 ring and the worker thread are in place (gpu.c
+   gpu_submit_gp0 / gpu_worker_pop_and_run / gpu_sync, worker in main.c), GP0 from
+   the bus and DMA is submitted to the worker, and the three drain fences from the
+   audit are wired, the readback fence inside psx_gpu_read_vram_or_gp0 (points 1
+   and the readback part of 2), the present fence in publish_frame (point 3a, the
+   drain-at-VBLANK option), and the reset/FIFO-clear drains in GP1 0x00/0x01
+   (point 5). GPUSTAT is left undrained (point 4), always-ready. Enabled by
+   JONBOY_GPU_THREAD, default off; the deterministic modes never set it and stay
+   bit-exact. Validated visually: the BIOS boot logo (polygon rasterization) and
+   the Chrono Trigger intro (24-bit FMV, CPU-to-VRAM image upload) both render
+   correctly with the worker on, no tearing, clean shutdown. Conformance stays
+   29/29 with the flag off.
+4. Remaining before default-on:
+   - Differential test: run a command stream through both paths and assert the
+     final VRAM is byte-identical, the primary correctness gate.
+   - Readback-heavy validation (Lunar 24-bit FMV, MDEC tests) to exercise the
+     readback fence hard.
+   - Make gpu_status access safe. GP0 0xE1 (texpage) on the worker updates
+     gpu_status bits that GPUSTAT reads on the emulation thread, a benign race
+     today (games poll the ready bits, which are always set) but to be made clean
+     (publish or atomic) before the flag goes on by default.
+   - Replace the spin waits (gpu_sync, ring-full backpressure) and the worker's
+     SDL_Delay(0) idle with a proper wakeup (semaphore or condvar), so a drain
+     does not burn a core.
+   - Measure the emulation-thread budget drop with the windowed `JONBOY_PERF` HUD
+     under a heavy scene, and record it against the step 0 raster baseline.
+5. Turn it on by default for the windowed build once the above are done.
 
 ## Expected payoff and how it is measured
 

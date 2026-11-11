@@ -89,4 +89,13 @@ uint32_t psx_gpu_get_status();
 // the threaded-GPU design (docs/threaded-gpu.md), step 0.
 void gpu_profile_enable(int on);
 uint64_t gpu_profile_ns(void);
+
+// Threaded GPU (docs/threaded-gpu.md). gpu_threaded selects the path: 0 runs GP0
+// inline (the deterministic default), 1 hands GP0 words to a worker thread.
+// gpu_submit_gp0 is the producer entry the bus and DMA call; gpu_worker_pop_and_run
+// is the consumer the worker loop calls; gpu_sync drains the queue at a fence.
+extern int gpu_threaded;
+void gpu_submit_gp0(uint32_t word);
+int gpu_worker_pop_and_run(void);
+void gpu_sync(void);
 #endif

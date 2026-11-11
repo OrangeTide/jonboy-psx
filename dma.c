@@ -183,7 +183,7 @@ dma_gpu_linked_list(uint32_t addr)
 
         for (uint32_t i = 0; i < count; i++) {
             addr = (addr + 4) & RAM_MASK;
-            psx_gpu_send_command_gp0(MEM_READ_32(addr));
+            gpu_submit_gp0(MEM_READ_32(addr));
         }
 
         if (header & 0x800000) {
@@ -205,7 +205,7 @@ dma_gpu_block(uint32_t addr, uint32_t words, int from_ram, int decrement)
         addr &= RAM_MASK;
 
         if (from_ram) {
-            psx_gpu_send_command_gp0(MEM_READ_32(addr));
+            gpu_submit_gp0(MEM_READ_32(addr));
         } else {
             MEM_WRITE_32(addr, psx_gpu_read_vram_or_gp0());
         }

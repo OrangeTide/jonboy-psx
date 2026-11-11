@@ -1,6 +1,7 @@
 #include "gpu.h"
 #include "vram.h"
 
+#include <stdatomic.h>
 #include <time.h>
 
 PSX_GPU gpu;
@@ -33,6 +34,77 @@ uint64_t
 gpu_profile_ns(void)
 {
     return gpu_raster_ns;
+}
+
+// ---- Threaded GPU command queue (step 3 of docs/threaded-gpu.md) ----
+// A single-producer (emulation thread), single-consumer (GPU worker) ring of GP0
+// command words. Enabled only in the windowed build; the deterministic modes keep
+// gpu_threaded = 0 and run GP0 inline, so they stay bit-exact and need no worker.
+// GP1 stays on the emulation thread; the few GP1 commands that touch the drawing
+// FIFO (reset, clear) drain the ring first, as do the VRAM-to-CPU readback and the
+// present snapshot. GPUSTAT is not drained, since games busy-poll it.
+#define GPUQ_SIZE 65536            // words, power of two
+#define GPUQ_MASK (GPUQ_SIZE - 1)
+
+int gpu_threaded = 0;
+
+static uint32_t gpuq_buf[GPUQ_SIZE];
+static _Atomic uint64_t gpuq_pushed = 0; // words submitted by the producer
+static _Atomic uint64_t gpuq_done = 0;   // words consumed by the worker
+
+// Producer (emulation thread): run a GP0 word now when synchronous, else hand it
+// to the worker. Blocks only if the ring is full, which is the intended
+// backpressure when the worker cannot keep up.
+void
+gpu_submit_gp0(uint32_t word)
+{
+    if (!gpu_threaded) {
+        psx_gpu_send_command_gp0(word);
+        return;
+    }
+
+    uint64_t head = atomic_load_explicit(&gpuq_pushed, memory_order_relaxed);
+
+    while (head - atomic_load_explicit(&gpuq_done, memory_order_acquire)
+           >= GPUQ_SIZE) {
+        /* ring full: spin until the worker frees a slot */
+    }
+
+    gpuq_buf[head & GPUQ_MASK] = word;
+    atomic_store_explicit(&gpuq_pushed, head + 1, memory_order_release);
+}
+
+// Consumer (GPU worker): run one queued GP0 word. Returns 0 when the ring is
+// empty. The release on gpuq_done publishes the VRAM writes this command made.
+int
+gpu_worker_pop_and_run(void)
+{
+    uint64_t done = atomic_load_explicit(&gpuq_done, memory_order_relaxed);
+
+    if (done == atomic_load_explicit(&gpuq_pushed, memory_order_acquire)) {
+        return 0;
+    }
+
+    psx_gpu_send_command_gp0(gpuq_buf[done & GPUQ_MASK]);
+    atomic_store_explicit(&gpuq_done, done + 1, memory_order_release);
+    return 1;
+}
+
+// Producer-side fence: wait until the worker has consumed every word submitted so
+// far. The acquire on gpuq_done makes all of the worker's VRAM writes up to that
+// point visible to this thread, so a VRAM read after gpu_sync is consistent.
+void
+gpu_sync(void)
+{
+    if (!gpu_threaded) {
+        return;
+    }
+
+    uint64_t target = atomic_load_explicit(&gpuq_pushed, memory_order_relaxed);
+
+    while (atomic_load_explicit(&gpuq_done, memory_order_acquire) < target) {
+        /* spin until the worker catches up */
+    }
 }
 
 void
@@ -1117,10 +1189,14 @@ psx_gpu_send_command_gp1(uint32_t value)
 
     switch (cmd) {
     case 0x00: // Reset GPU Subsystem
+        // These two touch the drawing FIFO and state the worker owns, so drain
+        // the queue first to keep them ordered with the GP0 stream.
+        gpu_sync();
         psx_gpu_reset();
         break;
 
     case 0x01: // Clear Command FIFO Buffer
+        gpu_sync();
         gpu.fifo_words_count = 0;
         gpu.current_packet_length = 0;
         gpu.pl_active = 0;
@@ -1156,6 +1232,12 @@ psx_gpu_send_command_gp1(uint32_t value)
 uint32_t
 psx_gpu_read_vram_or_gp0()
 {
+    // Readback fence: the worker must have run every queued draw (and the GP0 0xC0
+    // that set up this read) before the CPU reads VRAM back. A no-op when
+    // synchronous, and instant once the ring is already drained, so the per-word
+    // DMA block read pays the wait only on its first word.
+    gpu_sync();
+
     if (vram.is_read_active) {
         return psx_gpu_read_pixel_payload();
     }

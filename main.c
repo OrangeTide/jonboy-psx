@@ -261,6 +261,8 @@ typedef struct {
     // or a blocked event pump (a window drag) never stalls emulation or audio,
     // and vice versa. The main thread owns events, input, and presentation.
     SDL_Thread *emu;
+    SDL_Thread *gpu_worker;    // GPU rasterization worker (NULL unless threaded)
+    SDL_AtomicInt gpu_stop;    // 1 stops the GPU worker, set after the emu thread joins
     SDL_AtomicInt running;     // 0 stops the emu thread (set by the main thread)
 
     // Frame handoff: a lock-free triple buffer. The emu thread transposes VRAM
@@ -426,9 +428,33 @@ transpose_region_rowmajor(uint16_t *dst, const uint16_t *snap, int dw, int dh)
     }
 }
 
+// GPU worker thread: drain the GP0 command ring and rasterize into VRAM, in
+// parallel with the emulation thread. Runs only when gpu_threaded is set. It
+// keeps going until gpu_stop, which the main thread sets after the emu thread has
+// joined, then drains any remaining commands so the final frame is complete.
+static int SDLCALL
+gpu_worker_thread(void *data)
+{
+    AppContext *app = data;
+
+    while (!SDL_GetAtomicInt(&app->gpu_stop)) {
+        if (!gpu_worker_pop_and_run()) {
+            SDL_Delay(0); // ring empty: yield rather than spin hot
+        }
+    }
+    while (gpu_worker_pop_and_run()) {
+        /* drain whatever is left before exiting */
+    }
+    return 0;
+}
+
 static void
 publish_frame(AppContext *app)
 {
+    // Present fence: the worker must finish every draw queued this frame before we
+    // snapshot VRAM. A no-op when synchronous.
+    gpu_sync();
+
     int dx, dy, dw, dh, blank, bpp24, full;
     frame_display_region(&dx, &dy, &dw, &dh, &blank, &bpp24, &full);
     publish_vram_region(g_frame_buf[app->produce_idx], dx, dy, dw, dh, full);
@@ -778,6 +804,22 @@ jonboy_runapp(int argc, char *argv[])
     // the windowed path does this; the deterministic run modes read synchronously.
     cdrom_io_start();
 
+    // Optional GPU worker: when JONBOY_GPU_THREAD is set, GP0 rasterization runs
+    // on this thread in parallel with the emulation thread (docs/threaded-gpu.md).
+    // Off by default while the path is validated. Start it before the emu thread
+    // so the first submitted commands have a consumer.
+    gpu_threaded = getenv("JONBOY_GPU_THREAD") != NULL;
+    SDL_SetAtomicInt(&app.gpu_stop, 0);
+    if (gpu_threaded) {
+        app.gpu_worker = SDL_CreateThread(gpu_worker_thread, "jonboy-gpu", &app);
+        if (!app.gpu_worker) {
+            SDL_Log("Failed to start GPU worker: %s", SDL_GetError());
+            gpu_threaded = 0; // fall back to synchronous rasterization
+        } else {
+            SDL_Log("GPU worker thread enabled");
+        }
+    }
+
     // 4. Start the emulation thread. It runs the deterministic core; this main
     // thread stays free to pump events, sample input, and present frames, so a
     // slow present or a blocked event pump never stalls emulation or audio.
@@ -861,6 +903,12 @@ jonboy_runapp(int argc, char *argv[])
     SDL_SetAtomicInt(&app.running, 0);
     if (app.emu) {
         SDL_WaitThread(app.emu, NULL);
+    }
+    // Stop the GPU worker only after the emu thread has joined, so no more GP0
+    // commands are submitted while it drains and exits.
+    if (app.gpu_worker) {
+        SDL_SetAtomicInt(&app.gpu_stop, 1);
+        SDL_WaitThread(app.gpu_worker, NULL);
     }
     cdrom_io_stop();
     if (app.gamepad) {
