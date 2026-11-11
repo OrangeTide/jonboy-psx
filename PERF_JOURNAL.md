@@ -269,3 +269,32 @@ keeps the worker busy is unaffected.
 Validation: the differential test (make gpu-thread-test) now runs the same
 park/wake loop the windowed build uses and stays byte-identical to the synchronous
 path, clean under ThreadSanitizer. Conformance 29/29 (flag off, synchronous).
+
+### 2026-11-11, threaded GPU on by default in the windowed build
+
+The threaded GPU rollout (docs/threaded-gpu.md) is complete, so the windowed build
+now defaults gpu_threaded on. JONBOY_GPU_THREAD=0 opts out and falls back to inline
+rasterization; the deterministic run modes (headless, --boot, --exe, --gdb) never
+take this path and stay synchronous and bit-exact.
+
+This commits the payoff already measured in the entries above as the default
+experience, rather than a new measurement. The net effect on a polygon-heavy scene,
+from those entries:
+
+| scene                 | emu-thread budget | audio underruns/s | GPU-worker core |
+|-----------------------|-------------------|-------------------|-----------------|
+| BIOS logo, sync       | 95-98%            | 1-8               | n/a (inline)    |
+| BIOS logo, threaded   | 56-57%            | 0                 | ~50% (raster)   |
+| CT intro FMV, threaded| 65%               | 0                 | 10% (parked)    |
+
+The emulation thread sheds the step-0 raster fraction (20-40% of budget on polygon
+workloads) onto a second core, which pulls the over-budget BIOS-logo frames back
+under 16.67 ms and removes the audio underruns the synchronous build hit at
+saturation. On low-raster scenes the worker parks instead of spinning, so it costs
+about a tenth of a core rather than a whole one. FMV-bound scenes (CPU, MDEC, SPU)
+are unchanged, as expected, since they have almost no rasterization to offload.
+
+Gates before default-on, all green: differential test, readback-fence stress
+(make gpu-readback-test), gpu_status atomicity, the condvar worker wakeup, and the
+windowed payoff. Conformance stays 29/29 and the FFT boot regression reaches the
+same PC, since the deterministic modes are untouched.
