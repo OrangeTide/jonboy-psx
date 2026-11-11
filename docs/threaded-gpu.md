@@ -118,8 +118,48 @@ it drains below the fence watermark and when a requested fence completes.
 
 These are the whole problem. Every place the emulation thread (or main thread)
 reads VRAM or worker-owned drawing state is a point where the worker must have
-caught up. Step 1 of the implementation is an exhaustive audit of these; the
-known ones:
+caught up.
+
+### Audit result (step 2, complete)
+
+The exhaustive sweep is done and confirms the list below is complete. Findings:
+
+- VRAM (`vram.canvas`) is touched in exactly three files: `gpu.c` (texture reads
+  and primitive writes, all worker-internal), `vram.c`
+  (`psx_gpu_write_pixel_payload` for CPU-to-VRAM, worker-side, and
+  `psx_gpu_read_pixel_payload` for the VRAM-to-CPU readback), and `main.c`
+  (`publish_frame` and the headless `dump_vram_ppm`). No other subsystem touches
+  VRAM directly; MDEC output reaches the GPU through GP0/DMA, so it enters via the
+  queue like any other command.
+- Outside `gpu.c`, the only `gpu` struct fields read anywhere are display state
+  (`disp_x`, `disp_y`, `disp_24bpp`, `disp_blank`), all in `main.c` present and
+  publish. No drawing-state field (the FIFO, draw area, draw offset, texpage,
+  texture window, `gpu_status`) is read across the thread boundary. Drawing state
+  reaches the CPU only through the GPUREAD and GPUSTAT register functions.
+
+The complete set of cross-thread points:
+
+| # | point | code sites | fence |
+|---|-------|------------|-------|
+| 1 | VRAM-to-CPU readback (GPUREAD, GP0 0xC0) | `mem.c:437`, `dma.c:210` into `vram.c psx_gpu_read_pixel_payload` | drain the queue, then read; the drain also processes the 0xC0 setup (`rd_*`, `is_read_active`) the worker owns |
+| 2 | present snapshot | `main.c publish_frame` | worker publishes at frame end, or drain at VBLANK |
+| 3 | GPUSTAT | `mem.c:440` | always-ready now; add a queue-depth busy bit only if a title needs it |
+| 4 | GP1 reset (0x00) / FIFO clear (0x01) | `mem.c:531` into `psx_gpu_send_command_gp1` | route through the queue as control tokens so ordering holds |
+
+Confirmed non-fences:
+
+- Command writes in: GP0 (`mem.c:527`, `dma.c:186`, `dma.c:208`) and GP1 display
+  subcommands (`mem.c:531`) are one-way into the queue.
+- GP1 display subcommands (0x03/05/06/07/08) write display state on the emulation
+  thread and present reads it, which is already a cross-thread read today and is
+  independent of VRAM, so it is unchanged and needs no fence.
+- The headless `dump_vram_ppm` runs only in the deterministic modes, where the GPU
+  is synchronous and there is no worker, so it needs no fence.
+- No GP1 0x10 (GPU info / register readback) is implemented, so GPUREAD never
+  returns drawing-state registers today. If 0x10 is added later it becomes a fifth
+  fence: drain, or publish the handful of small register values.
+
+The rest of this section is the detailed discussion of each point:
 
 1. **VRAM-to-CPU readback.** A game issues GP0 0xC0, then drains the result
    through GPUREAD (`psx_gpu_read_vram_or_gp0`), directly or via a DMA channel 2
@@ -200,10 +240,12 @@ thread, with fences where the CPU looks at the result.
 
 ## Rollout
 
-1. Measure the raster fraction (step 0) and record it.
+1. Measure the raster fraction (step 0) and record it. Done: 20-40% of the budget
+   on polygon workloads, 1% on FMV (see PERF_JOURNAL.md).
 2. Audit every emulation-thread and main-thread read of VRAM and worker-owned
-   drawing state. Enumerate the fences. This document lists the known ones; the
-   audit confirms the list is complete.
+   drawing state, and enumerate the fences. Done: see "Audit result" above. Four
+   cross-thread points, VRAM touched in three files only, no drawing-state read
+   crosses the boundary outside the register functions.
 3. Add the command ring and the worker, behind a flag, running the existing GP0
    handler. No fences yet; validate on draw-only, no-readback content.
 4. Add the readback fence (point 1 and 2). Validate the differential test on a
