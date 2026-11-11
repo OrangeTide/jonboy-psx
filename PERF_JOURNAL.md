@@ -174,6 +174,17 @@ the emulation thread.
 |--------------|-------------|-------------|--------------|-------------|
 | W1 bios-logo | 13.8-15.0 ms | 4.3-6.1 ms | 31-40%       | 41-66%      |
 | W2 ct-intro  | ~10.0 ms     | 0.10 ms    | 1%           | ~0%         |
+| W3 fft-battle | 13.4 ms     | 2.70 ms    | 20% (med 25%) | 1.2%       |
+
+W3 is real gameplay: the Final Fantasy Tactics Orbonne tutorial battle, the
+isometric 3D map that the GTE transforms and the rasterizer draws as textured and
+gouraud polygons. Reached by warming up 16200 frames under
+assets/fft_tutorial_battle.script (the last scripted input is at frame ~16037),
+measured 600 frames in the battle. Run at JONBOY_FASTTICK=0 so the script, which
+is tuned to the exact-timing core, lands in the battle; at the shipped N=8 the
+raster work is identical and the budget a touch lower, so the share would be
+marginally higher. That the raster time is a real 2.7 ms (not near-zero like the
+FMV) confirms the battle was reached and is rendering polygons.
 
 The payoff is strongly workload dependent, which is exactly what step 0 is for:
 
@@ -187,10 +198,11 @@ The payoff is strongly workload dependent, which is exactly what step 0 is for:
   its budget is bound by the CPU, MDEC, and SPU.
 
 Conclusion: threaded GPU is worth building, but its value lands on polygon-driven
-2D/3D scenes, not FMV. The right next measurement is the raster share during
-actual gameplay (a battle, an overworld), not just the boot logo, to confirm the
-30-40% range holds where it matters. The number excludes CPU-to-VRAM image upload
-(payload writes), so it is a lower bound on what moves to the worker.
+2D/3D scenes, not FMV. Confirmed on real gameplay (W3): the FFT tutorial battle
+spends 20% of its budget (median 25%) on rasterization, between the boot logo and
+the FMV, so moving raster to a worker frees a fifth to two fifths of the
+emulation-thread budget on polygon workloads. The number excludes CPU-to-VRAM
+image upload (payload writes), so it is a lower bound on what moves to the worker.
 
 Caveat: the profiling adds two clock reads per completed GP0 command, which
 slightly inflates the budget during a profiled run. The raster *share* (raster /

@@ -31,17 +31,17 @@ the emulation thread. The result (recorded in `PERF_JOURNAL.md`):
 
 | workload     | raster share of budget |
 |--------------|------------------------|
-| BIOS logo (polygon heavy) | 31-40% |
+| BIOS logo (polygon heavy)         | 31-40% |
+| FFT tutorial battle (3D gameplay) | 20% (median 25%) |
 | Chrono Trigger intro (24-bit FMV) | 1% |
 
-The payoff is strongly workload dependent. On polygon-driven scenes it is 30-40%
-of the budget, and those are exactly the frames that currently overrun (the BIOS
-logo's median frame is already over 16.67 ms), so threading the GPU targets the
-cases that need it. On FMV it is negligible, since that path is MDEC and upload
-bound, not rasterization. So the work is worth doing, but its value is on 2D/3D
-gameplay, not video. The next measurement worth taking is the raster share during
-real gameplay (a battle, an overworld) to confirm the 30-40% holds where it
-matters. The figure excludes CPU-to-VRAM image upload, so it is a lower bound.
+The payoff is strongly workload dependent. On polygon-driven scenes it is 20-40%
+of the budget, confirmed on real gameplay (the FFT Orbonne battle, a GTE-driven
+isometric 3D map). The boot logo's polygon-heavy frames are also the ones that
+currently overrun 16.67 ms, so threading the GPU targets the cases that need it.
+On FMV it is negligible, since that path is MDEC and upload bound, not
+rasterization. So the work is worth doing, with its value on 2D/3D gameplay, not
+video. The figure excludes CPU-to-VRAM image upload, so it is a lower bound.
 
 ## Ownership model
 
