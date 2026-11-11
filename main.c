@@ -686,12 +686,22 @@ jonboy_runapp(int argc, char *argv[])
     AppContext app = { 0 };
     SDL_SetAtomicInt(&app.running, 1);
 
-    // 2. Create an SDL3 window and hardware-accelerated renderer
-    if (!SDL_CreateWindowAndRenderer("JonBoy Toy Console (R3051)", 1024, 512, 0, &app.window, &app.renderer)) {
+    // 2. Create an SDL3 window and hardware-accelerated renderer. The PSX display
+    // is 4:3 on a TV whatever its internal pixel resolution, so the window opens
+    // at a 4:3 size and is resizable.
+    if (!SDL_CreateWindowAndRenderer("JonBoy Toy Console (R3051)", 960, 720,
+                                     SDL_WINDOW_RESIZABLE, &app.window, &app.renderer)) {
         SDL_Log("Window/Renderer Creation Failed: %s", SDL_GetError());
         SDL_Quit();
         return 1;
     }
+
+    // Present into a 4:3 logical area: the picture always keeps the 4:3 aspect, and
+    // a window with a different aspect is pillarboxed or letterboxed with the clear
+    // color rather than stretching the image. Everything below draws to the whole
+    // logical area (a NULL destination), so SDL applies the scaling and bars.
+    SDL_SetRenderLogicalPresentation(app.renderer, 640, 480,
+                                     SDL_LOGICAL_PRESENTATION_LETTERBOX);
 
     // Pace presentation to the display refresh so the main thread does not spin.
     // The emulation thread keeps its own real-time pacing independently.
