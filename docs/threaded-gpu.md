@@ -309,11 +309,10 @@ thread, with fences where the CPU looks at the result.
    All of the gates above are now green: the differential test, the readback-fence
    stress, gpu_status safety, the condition-variable wakeup, and the measured
    windowed payoff. Nothing correctness-related remains.
-5. Turn it on by default for the windowed build. This is the only remaining step: a
-   one-line change to default `gpu_threaded` on (still overridable by the absence of
-   JONBOY_GPU_THREAD, or a new opt-out) in the windowed path, leaving the
-   deterministic modes synchronous. It is a behavior change for every windowed run,
-   so it is kept as its own deliberate step.
+5. Turn it on by default for the windowed build: done. `jonboy_runapp` now defaults
+   `gpu_threaded` on; `JONBOY_GPU_THREAD=0` opts out and falls back to inline
+   rasterization. The deterministic run modes (headless, --boot, --exe, --gdb) never
+   reach this path, so they stay synchronous and bit-exact. The rollout is complete.
 
 ## Expected payoff and how it is measured
 

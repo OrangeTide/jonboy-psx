@@ -814,11 +814,13 @@ jonboy_runapp(int argc, char *argv[])
     // the windowed path does this; the deterministic run modes read synchronously.
     cdrom_io_start();
 
-    // Optional GPU worker: when JONBOY_GPU_THREAD is set, GP0 rasterization runs
-    // on this thread in parallel with the emulation thread (docs/threaded-gpu.md).
-    // Off by default while the path is validated. Start it before the emu thread
-    // so the first submitted commands have a consumer.
-    gpu_threaded = getenv("JONBOY_GPU_THREAD") != NULL;
+    // GPU worker: GP0 rasterization runs on this thread in parallel with the
+    // emulation thread (docs/threaded-gpu.md). On by default in the windowed build;
+    // the deterministic run modes never reach here and stay synchronous. Set
+    // JONBOY_GPU_THREAD=0 to opt out (fall back to inline rasterization). Start it
+    // before the emu thread so the first submitted commands have a consumer.
+    const char *gpu_thread_env = getenv("JONBOY_GPU_THREAD");
+    gpu_threaded = (gpu_thread_env == NULL) ? 1 : (atoi(gpu_thread_env) != 0);
     if (gpu_threaded) {
         gpu_worker_reset();
         app.gpu_worker = SDL_CreateThread(gpu_worker_thread, "jonboy-gpu", &app);
