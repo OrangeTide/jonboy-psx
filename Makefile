@@ -13,6 +13,17 @@ else
 OPT?=-O2
 endif
 CFLAGS=-Wall -W -g $(OPT)
+# Cross-toolchain for the MIPS test carts and the loader PS-EXE. Different distros
+# and crosstool-NG builds name the mipsel bare-metal toolchain differently, so
+# probe PATH for the first candidate gcc that exists rather than hardcoding one,
+# then derive the as/ld/objcopy prefix from its own triple ($(CC) -dumpmachine).
+# Override the probe by passing MIPSEL_CC=<name>-gcc on the make command line.
+MIPSEL_CANDIDATES=mipsel-none-elf-gcc mipsel-unknown-elf-gcc mipsel-linux-gnu-gcc mipsel-elf-gcc
+MIPSEL_CC?=
+ifeq ($(MIPSEL_CC),)
+MIPSEL_CC:=$(firstword $(foreach c,$(MIPSEL_CANDIDATES),$(if $(shell command -v $(c) 2>/dev/null),$(c))))
+endif
+MIPSEL_ARCH:=$(shell $(MIPSEL_CC) -dumpmachine 2>/dev/null)
 all ::
 clean ::
 clean-all : clean
@@ -133,13 +144,13 @@ all :: $(TEST_CARTS)
 clean ::
 	$(RM) $(TESTS:%=$(BINDIR)/%.cart) $(TESTS:%=$(BINDIR)/%.elf) $(TESTS:%=$(BINDIR)/%.o)
 $(BINDIR)/%.cart : $(BINDIR)/%.elf
-	mipsel-unknown-elf-objcopy -O binary -j .text -j .data $< $@
+	$(MIPSEL_ARCH)-objcopy -O binary -j .text -j .data $< $@
 $(BINDIR)/%.o : %.asm | $(BINDIR)
-	mipsel-unknown-elf-as -march=r3000 -mabi=32 -o $@ $<
+	$(MIPSEL_ARCH)-as -march=r3000 -mabi=32 -o $@ $<
 $(BINDIR)/%.elf : $(BINDIR)/%.o
-	mipsel-unknown-elf-ld -Ttext 0x0 -e __start -o $@ $<
+	$(MIPSEL_ARCH)-ld -Ttext 0x0 -e __start -o $@ $<
 ## loader (guest menu program, a PS-EXE sideloaded at kernel-up)
-LOADER_CC=mipsel-unknown-elf-gcc
+LOADER_CC=$(MIPSEL_ARCH)-gcc
 LOADER_CFLAGS=-march=r3000 -mabi=32 -G0 -fno-pic -mno-abicalls -O2 -ffreestanding -Wall
 LOADER_SRC=loader/crt0.s loader/main.c
 all :: $(BINDIR)/loader.exe
@@ -150,7 +161,7 @@ $(BINDIR)/mkexe : loader/mkexe.c | $(BINDIR)
 $(BINDIR)/loader.elf : $(LOADER_SRC) loader/loader.ld | $(BINDIR)
 	$(LOADER_CC) $(LOADER_CFLAGS) -nostdlib -T loader/loader.ld -o $@ $(LOADER_SRC)
 $(BINDIR)/loader.exe : $(BINDIR)/loader.elf $(BINDIR)/mkexe
-	mipsel-unknown-elf-objcopy -O binary $< $(BINDIR)/loader.bin
+	$(MIPSEL_ARCH)-objcopy -O binary $< $(BINDIR)/loader.bin
 	$(BINDIR)/mkexe $(BINDIR)/loader.bin $@
 ## end
 -include $(wildcard *.d)
