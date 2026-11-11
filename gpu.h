@@ -1,6 +1,7 @@
 #ifndef GPU_H_
 #define GPU_H_
 #include <stdint.h>
+#include <stdatomic.h>
 
 #define GPU_FIFO_MAX 64
 
@@ -10,8 +11,11 @@ typedef struct {
     uint32_t fifo_words_count;
     uint32_t current_packet_length;
 
-    // Core Engine Registers
-    uint32_t gpu_status; // Exposed via reading 0x1F801814
+    // Core Engine Registers. gpu_status is read by the CPU through GPUSTAT
+    // (0x1F801814) on the emulation thread and updated by the draw-mode command
+    // (GP0 0xE1) on the GPU worker thread, so it is atomic to keep that
+    // cross-thread access from tearing. See set_texpage_bits and gpu_threaded.
+    _Atomic uint32_t gpu_status;
 
     // Rendering state set by the GP0 environment commands.
     int32_t draw_offset_x; // added to every primitive vertex (GP0 0xE5)

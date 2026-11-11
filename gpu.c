@@ -260,7 +260,7 @@ psx_gpu_reset(void)
 {
     gpu.fifo_words_count = 0;
     gpu.current_packet_length = 0;
-    gpu.gpu_status = 0x14802000;
+    atomic_store_explicit(&gpu.gpu_status, 0x14802000, memory_order_relaxed);
     gpu.draw_offset_x = 0;
     gpu.draw_offset_y = 0;
     gpu.draw_x0 = 0;
@@ -426,6 +426,14 @@ set_texpage_bits(uint32_t tp)
     gpu.tex_page_y = ((tp >> 4) & 1) * 256;
     gpu.tex_semi_mode = (tp >> 5) & 3;
     gpu.tex_depth = (tp >> 7) & 3;
+
+    // Mirror the texture-page bits into GPUSTAT (bits 0-8) the way hardware does,
+    // so a game reading 0x1F801814 sees the current draw mode. This runs on the
+    // GPU worker when threaded, and GPUSTAT is read on the emulation thread, so the
+    // store is atomic (single writer, relaxed is enough) to avoid a torn read.
+    uint32_t s = atomic_load_explicit(&gpu.gpu_status, memory_order_relaxed);
+    s = (s & ~0x1FFu) | (tp & 0x1FF);
+    atomic_store_explicit(&gpu.gpu_status, s, memory_order_relaxed);
 }
 
 // Blend a foreground pixel over the background already in VRAM, using one of
@@ -1401,5 +1409,6 @@ psx_gpu_get_status()
     // Bit 26: Ready to receive Command Word (Always set to 1)
     // Bit 27: Ready to receive DMA block (Always set to 1)
     // Bit 28: Ready to send VRAM data to CPU (Always set to 1)
-    return gpu.gpu_status | (1 << 26) | (1 << 27) | (1 << 28);
+    uint32_t s = atomic_load_explicit(&gpu.gpu_status, memory_order_relaxed);
+    return s | (1 << 26) | (1 << 27) | (1 << 28);
 }

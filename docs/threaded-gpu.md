@@ -271,14 +271,23 @@ thread, with fences where the CPU looks at the result.
      passes repeatedly and is clean under ThreadSanitizer (`setarch -R` with
      `-fsanitize=thread`), which confirms the release/acquire ring ordering and
      the gpu_sync happens-before have no data race.
-   - Readback-heavy validation (Lunar 24-bit FMV, MDEC tests) to exercise the
-     readback fence hard. The differential test covers VRAM-write equivalence and
-     the ring/worker/drain concurrency; it does not emit GP0 0xC0 readback, so the
-     readback fence still wants a dedicated stress.
-   - Make gpu_status access safe. GP0 0xE1 (texpage) on the worker updates
-     gpu_status bits that GPUSTAT reads on the emulation thread, a benign race
-     today (games poll the ready bits, which are always set) but to be made clean
-     (publish or atomic) before the flag goes on by default.
+   - Readback-fence stress: done. `make gpu-readback-test` (test_gpu_readback.c)
+     queues a heavy draw stream plus a GP0 0xC0 readback setup through the ring,
+     then immediately reads the region back through psx_gpu_read_vram_or_gp0 while
+     the worker is still rasterizing, so the fence has to block. It checks the
+     returned words and the final VRAM match the synchronous reference, byte for
+     byte, over many iterations, and is clean under ThreadSanitizer. This is the
+     GP0 0xC0 case the differential test does not emit. If the fence were removed
+     the read would race the lagging worker and the words would differ.
+   - Make gpu_status access safe: done. gpu_status is now `_Atomic` (gpu.h), the
+     draw-mode command (GP0 0xE1, set_texpage_bits) publishes the texpage bits into
+     it with a relaxed atomic store on the worker, and GPUSTAT reads it with a
+     relaxed atomic load on the emulation thread, so the cross-thread access cannot
+     tear. As a side effect GPUSTAT now reflects the live texture page (bits 0-8)
+     the way hardware does, instead of a constant. The value is a pure function of
+     the command stream, identical in synchronous and threaded modes, so it does
+     not affect determinism: the FFT boot regression reaches the same PC and
+     conformance stays 29/29.
    - Replace the spin waits with a proper wakeup: done. The worker now parks on a
      condition variable (`gpuq_not_empty`) when the ring drains, after a short
      bounded spin that absorbs the sub-microsecond gaps between command bursts in a
@@ -297,7 +306,14 @@ thread, with fences where the CPU looks at the result.
      on the BIOS boot logo the emulation thread's budget share fell from 95-98% to
      56-57% and audio underruns went from up to 8/s to 0 (PERF_JOURNAL.md). The
      payoff is confirmed; the items above are what remain before default-on.
-5. Turn it on by default for the windowed build once the above are done.
+   All of the gates above are now green: the differential test, the readback-fence
+   stress, gpu_status safety, the condition-variable wakeup, and the measured
+   windowed payoff. Nothing correctness-related remains.
+5. Turn it on by default for the windowed build. This is the only remaining step: a
+   one-line change to default `gpu_threaded` on (still overridable by the absence of
+   JONBOY_GPU_THREAD, or a new opt-out) in the windowed path, leaving the
+   deterministic modes synchronous. It is a behavior change for every windowed run,
+   so it is kept as its own deliberate step.
 
 ## Expected payoff and how it is measured
 
