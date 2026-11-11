@@ -160,3 +160,39 @@ Post-change baseline (default build, N=8 now active in --bench):
 | workload   | budget mean | over budget | transpose mean |
 |------------|-------------|-------------|----------------|
 | W2 ct-intro | ~9.6 ms     | low         | 1.24 ms (full) |
+
+### 2026-11-11, measure the rasterization fraction (threaded-GPU step 0)
+
+Before committing to the threaded-GPU work (docs/threaded-gpu.md), measure how
+much of the per-frame budget is GP0 primitive dispatch, the triangle/rect/fill/
+copy rasterization a GPU worker would run instead. `--bench` now times that work
+(gpu_profile in gpu.c, off except during the benchmark) and reports it as a
+subset of the budget. It is the ceiling of what threading the GPU can remove from
+the emulation thread.
+
+| workload     | budget mean | raster mean | raster share | over budget |
+|--------------|-------------|-------------|--------------|-------------|
+| W1 bios-logo | 13.8-15.0 ms | 4.3-6.1 ms | 31-40%       | 41-66%      |
+| W2 ct-intro  | ~10.0 ms     | 0.10 ms    | 1%           | ~0%         |
+
+The payoff is strongly workload dependent, which is exactly what step 0 is for:
+
+- The animated BIOS logo is polygon heavy (gouraud and textured primitives), and
+  rasterization is 31-40% of its budget. This is also the window whose median
+  frame is already over the 16.67 ms budget, so moving 4-6 ms of raster onto a
+  worker would pull those frames back under budget. Threaded GPU directly targets
+  the frames that currently overrun.
+- The Chrono Trigger intro is a 24-bit FMV: MDEC decode and image upload, almost
+  no polygon dispatch, so raster is 1%. Threading the GPU does nothing for it;
+  its budget is bound by the CPU, MDEC, and SPU.
+
+Conclusion: threaded GPU is worth building, but its value lands on polygon-driven
+2D/3D scenes, not FMV. The right next measurement is the raster share during
+actual gameplay (a battle, an overworld), not just the boot logo, to confirm the
+30-40% range holds where it matters. The number excludes CPU-to-VRAM image upload
+(payload writes), so it is a lower bound on what moves to the worker.
+
+Caveat: the profiling adds two clock reads per completed GP0 command, which
+slightly inflates the budget during a profiled run. The raster *share* (raster /
+budget, both measured in the same run) is robust to this; the absolute budget in
+these rows is marginally higher than an unprofiled run.

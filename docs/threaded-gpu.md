@@ -21,17 +21,27 @@ This is the model duckstation and pcsx-redux use. The emulation thread produces 
 stream of GPU commands; a GPU thread consumes it and draws into VRAM. The two
 only meet where the CPU reads VRAM back, which is rare.
 
-## Step 0: measure the ceiling first
+## Step 0: measure the ceiling first (done)
 
 Before building anything, measure how much per-frame time rasterization actually
-is, so the payoff is known. Add a timing probe around
-`execute_completed_gp0_command` (and the payload writes) and report a per-frame
-"raster" line in `--bench`, the same way the transpose line was split out. That
-number is the upper bound on what a GPU worker can remove from the
-emulation-thread budget. If it is small on the target workloads, the large effort
-here is not justified and the simpler levers (dynarec, further raster micro-opts)
-come first. Record the measurement in `PERF_JOURNAL.md` as the baseline this work
-is judged against.
+is, so the payoff is known. `--bench` now times `execute_completed_gp0_command`
+(gated by gpu_profile in gpu.c) and reports a per-frame raster line as a subset of
+the budget. That number is the upper bound on what a GPU worker can remove from
+the emulation thread. The result (recorded in `PERF_JOURNAL.md`):
+
+| workload     | raster share of budget |
+|--------------|------------------------|
+| BIOS logo (polygon heavy) | 31-40% |
+| Chrono Trigger intro (24-bit FMV) | 1% |
+
+The payoff is strongly workload dependent. On polygon-driven scenes it is 30-40%
+of the budget, and those are exactly the frames that currently overrun (the BIOS
+logo's median frame is already over 16.67 ms), so threading the GPU targets the
+cases that need it. On FMV it is negligible, since that path is MDEC and upload
+bound, not rasterization. So the work is worth doing, but its value is on 2D/3D
+gameplay, not video. The next measurement worth taking is the raster share during
+real gameplay (a battle, an overworld) to confirm the 30-40% holds where it
+matters. The figure excludes CPU-to-VRAM image upload, so it is a lower bound.
 
 ## Ownership model
 

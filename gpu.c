@@ -1,7 +1,39 @@
 #include "gpu.h"
 #include "vram.h"
 
+#include <time.h>
+
 PSX_GPU gpu;
+
+// Optional rasterization profiling for the benchmark (step 0 of the threaded-GPU
+// plan). When gpu_profile is set, the time spent dispatching completed GP0
+// primitives (the triangle/rect/fill/copy rasterization that a GPU worker would
+// run) is accumulated into gpu_raster_ns. This is the work that would move off
+// the emulation thread, so it bounds the threaded-GPU payoff. Off by default and
+// touched only once per completed command, so it costs a predicted branch.
+int gpu_profile = 0;
+uint64_t gpu_raster_ns = 0;
+
+static uint64_t
+gpu_now_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+void
+gpu_profile_enable(int on)
+{
+    gpu_profile = on;
+    gpu_raster_ns = 0;
+}
+
+uint64_t
+gpu_profile_ns(void)
+{
+    return gpu_raster_ns;
+}
 
 void
 psx_gpu_reset(void)
@@ -1067,7 +1099,14 @@ psx_gpu_send_command_gp0(uint32_t value)
     // Fire the command dispatcher if the buffer depth condition is fulfilled
     if (gpu.fifo_words_count >= gpu.current_packet_length) {
         uint32_t master_opcode = gpu.command_fifo[0] >> 24;
-        execute_completed_gp0_command(master_opcode, gpu.command_fifo);
+
+        if (gpu_profile) {
+            uint64_t t0 = gpu_now_ns();
+            execute_completed_gp0_command(master_opcode, gpu.command_fifo);
+            gpu_raster_ns += gpu_now_ns() - t0;
+        } else {
+            execute_completed_gp0_command(master_opcode, gpu.command_fifo);
+        }
     }
 }
 

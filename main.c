@@ -1345,12 +1345,17 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     // the benchmark does the identical work the windowed build does.
     double *ms = malloc((size_t)measure_frames * sizeof *ms);
     double *tr = malloc((size_t)measure_frames * sizeof *tr);
+    // raster[] is the per-frame time spent dispatching GP0 primitives, a subset
+    // of the budget: it is the work a GPU worker thread would run instead, so it
+    // bounds the threaded-GPU payoff (step 0 of docs/threaded-gpu.md).
+    double *raster = malloc((size_t)measure_frames * sizeof *raster);
     uint16_t *bench_pub = malloc((size_t)VRAM_WIDTH * VRAM_HEIGHT * sizeof(uint16_t));
     uint16_t *bench_row = malloc((size_t)VRAM_WIDTH * VRAM_HEIGHT * sizeof(uint16_t));
-    if (!ms || !tr || !bench_pub || !bench_row) {
+    if (!ms || !tr || !raster || !bench_pub || !bench_row) {
         fprintf(stderr, "bench: out of memory\n");
         free(ms);
         free(tr);
+        free(raster);
         free(bench_pub);
         free(bench_row);
         return 1;
@@ -1372,8 +1377,10 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     // Measure: record the wall time between VBLANKs. A frame counter that jumps
     // by more than one (never, with the per-step tick, but defensively) splits
     // its wall time evenly across the frames it covers.
+    gpu_profile_enable(1); // accumulate GP0 primitive-dispatch time per frame
     uint32_t recorded = 0;
     uint32_t last_frame = psx_frame_count();
+    uint64_t raster_prev = gpu_profile_ns();
     uint64_t t_prev = SDL_GetPerformanceCounter();
     while (!cpu.halted && recorded < measure_frames) {
         if (service_active) {
@@ -1384,6 +1391,9 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
         if (f != last_frame) {
             uint64_t now = SDL_GetPerformanceCounter();
             double step_ms = (double)(now - t_prev) / freq * 1000.0;
+            uint64_t raster_now = gpu_profile_ns();
+            double raster_ms = (double)(raster_now - raster_prev) / 1.0e6;
+            raster_prev = raster_now;
             uint32_t span = f - last_frame;
 
             // Do the same end-of-frame work the windowed build does, on the live
@@ -1409,6 +1419,7 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
             for (uint32_t j = 0; j < span && recorded < measure_frames; j++) {
                 ms[recorded] = (step_ms + pub_ms) / (double)span;
                 tr[recorded] = tr_ms / (double)span;
+                raster[recorded] = raster_ms / (double)span;
                 recorded++;
             }
             // Reset after the publish/transpose so their time is not charged to
@@ -1417,12 +1428,14 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
             last_frame = f;
         }
     }
+    gpu_profile_enable(0);
 
     if (recorded == 0) {
         fprintf(stderr, "bench: no frames emulated (did the CPU halt during "
                 "warmup?)\n");
         free(ms);
         free(tr);
+        free(raster);
         free(bench_pub);
         free(bench_row);
         return 1;
@@ -1443,6 +1456,7 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
         fprintf(stderr, "bench: out of memory\n");
         free(ms);
         free(tr);
+        free(raster);
         free(bench_pub);
         free(bench_row);
         return 1;
@@ -1516,6 +1530,21 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     double tr_median = sorted[recorded / 2];
     double tr_p99 = sorted[(uint32_t)((double)(recorded - 1) * 0.99)];
 
+    // Rasterization statistics: the GP0 primitive-dispatch time, a subset of the
+    // budget, that a GPU worker thread would run instead.
+    double rs_sum = 0.0, rs_worst = 0.0;
+    for (uint32_t i = 0; i < recorded; i++) {
+        rs_sum += raster[i];
+        if (raster[i] > rs_worst) {
+            rs_worst = raster[i];
+        }
+    }
+    double rs_mean = rs_sum / recorded;
+    memcpy(sorted, raster, (size_t)recorded * sizeof *sorted);
+    qsort(sorted, recorded, sizeof *sorted, bench_cmp_double);
+    double rs_median = sorted[recorded / 2];
+    double rs_p99 = sorted[(uint32_t)((double)(recorded - 1) * 0.99)];
+
     printf("\n==== JonBoy benchmark ====\n");
     printf("workload: %s%s%s\n",
            g_bios_path ? g_bios_path : "(no bios)",
@@ -1530,6 +1559,10 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     printf("  over budget: %u / %u frames (%.1f%%)\n",
            over, recorded, 100.0 * over / recorded);
     printf("  (includes the end-of-frame VRAM publish copy)\n");
+    printf("  of which rasterization (GP0 dispatch, movable to a GPU worker):\n");
+    printf("    mean %.2f ms (%.0f%% of budget)   median %.2f ms   p99 %.2f ms   max %.2f ms\n",
+           rs_mean, mean > 0.0 ? 100.0 * rs_mean / mean : 0.0,
+           rs_median, rs_p99, rs_worst);
     printf("\naudio model (%.0f ms SPU ring @ %d Hz):\n", ring_cap, AUDIO_RATE);
     printf("  underrun events: %u   starved frames: %u   total gap: %.1f ms\n",
            underrun_events, starved, gap_ms);
@@ -1547,6 +1580,7 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     free(sorted);
     free(ms);
     free(tr);
+    free(raster);
     free(bench_pub);
     free(bench_row);
     return 0;

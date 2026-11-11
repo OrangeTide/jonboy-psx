@@ -82,4 +82,11 @@ void psx_gpu_send_command_gp0(uint32_t value);
 void psx_gpu_send_command_gp1(uint32_t value);
 uint32_t psx_gpu_read_vram_or_gp0();
 uint32_t psx_gpu_get_status();
+
+// Rasterization profiling for the benchmark. gpu_profile_enable(1) starts
+// accumulating the wall time spent dispatching completed GP0 primitives and
+// resets the counter; gpu_profile_ns() reads the accumulated nanoseconds. See
+// the threaded-GPU design (docs/threaded-gpu.md), step 0.
+void gpu_profile_enable(int on);
+uint64_t gpu_profile_ns(void);
 #endif
