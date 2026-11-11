@@ -544,6 +544,11 @@ static and a slight pitch drop. Target: real-time on a Pi 5, near real-time on P
   since the battle is bound by GPU/GTE/MDEC and real instruction work, not
   per-instruction overhead. Validated: conformance passes, FFT boots to the
   battle, and the final battle frame is bit-identical to the default build.
+  Now productized: cpu_set_fasttick() makes it a runtime setting, and the
+  real-time windowed build and the --bench harness enable N=8 while the
+  deterministic modes (headless, exe, boot, gdb) stay at 0. A clean A/B on the
+  Chrono Trigger window measured ~5% (budget mean 10.14 -> 9.59 ms). The env
+  override JONBOY_FASTTICK still wins for experiments.
 - [ ] evaluate JONBOY_FASTTICK on the Pi 3/4/5. Per-instruction overhead and the
   scheduler flush's memory latency are a larger share of the budget on a slower
   in-order CPU, so tick-batching should help more there than on desktop. Sweep
