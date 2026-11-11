@@ -497,6 +497,34 @@ Expansion Region 2 (0x1F802000), defined in psio.h (LDR_REG_* / LDR_CMD_*).
     reader sees a frame's samples before the advanced write index. On an underrun
     the callback feeds less and SDL pads with silence.
 
+- [x] run GP0 rasterization on its own GPU worker thread (windowed build only,
+  docs/threaded-gpu.md). On by default; JONBOY_GPU_THREAD=0 opts out to inline
+  rasterization, and the deterministic modes (headless, --boot, --exe, --gdb) never
+  take the path and stay bit-exact. The emu thread hands GP0 words to a lock-free
+  single-producer/single-consumer ring (gpu.c, gpu_submit_gp0); the worker drains it
+  and owns all VRAM and drawing-state mutation (gpu_worker_pop_and_run). GP1 display
+  commands stay on the emu thread (they touch no VRAM). Cross-thread reads are fenced
+  by draining the ring: the VRAM-to-CPU readback (GP0 0xC0 / GPUREAD), the end-of-frame
+  present snapshot, and GP1 reset / FIFO-clear all call gpu_sync first. GPUSTAT is
+  atomic and left undrained (always-ready), and reflects the live texture page like
+  hardware. This moves the step-0 raster fraction (20-40% of the per-frame budget on
+  polygon scenes) onto a second core: on the BIOS boot logo the emu-thread budget fell
+  from 95-98% to 56-57% and audio underruns from up to 8/s to 0 (PERF_JOURNAL.md).
+  - [x] lock-free command ring and worker, with the three drain fences from the
+    cross-thread audit wired (readback, present, reset/FIFO-clear).
+  - [x] condition-variable worker wakeup: the worker parks on gpuq_not_empty when the
+    ring drains (after a short bounded spin), and gpu_sync / backpressure park on
+    gpuq_drained, instead of busy-waiting. A seq_cst handshake on gpuq_pushed and a
+    gpuq_worker_sleeping flag keeps the hot path lock-free and the wake race-free. On
+    a low-raster FMV the worker costs ~10% of a core instead of a pegged one.
+  - [x] gpu_status (GPUSTAT) made atomic so the worker's texpage publish and the emu
+    thread's read cannot tear.
+  - [x] correctness gates, all green: differential test (make gpu-thread-test, VRAM
+    byte-identical to synchronous), readback-fence stress (make gpu-readback-test, the
+    GP0 0xC0 case), both clean under ThreadSanitizer (`setarch -R`, `-fsanitize=thread`);
+    conformance 29/29 and the FFT boot regression unchanged (deterministic modes
+    untouched).
+
 ## Performance
 
 The desktop core runs above real time on average but the windowed build can dip

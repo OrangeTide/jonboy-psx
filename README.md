@@ -6,10 +6,27 @@ a DualShock controller, and memory cards. It also has an invented PSIO-style
 SD-card cartridge and an in-emulation loader menu for booting PS-EXE and disc
 images.
 
+## Screenshots
+
+Final Fantasy Tactics, booted from the retail BIOS off a mounted disc, reaching
+its first tactical battle under scripted input:
+
+| Title | Orbonne intro | Tutorial battle |
+|-------|---------------|-----------------|
+| ![FFT title](assets/fft_title.png) | ![Orbonne intro](assets/fft_orbonne_intro.png) | ![Tutorial battle](assets/fft_tutorial_battle.png) |
+
+Chrono Trigger:
+
+| Overworld | Bedroom |
+|-----------|---------|
+| ![Chrono Trigger overworld](assets/ct_overworld.png) | ![Chrono Trigger bedroom](assets/ct_bedroom.png) |
+
 Working so far:
 
 - R3000A interpreter (the full CPU conformance suite passes) with the GTE.
-- Software GPU: flat and textured polygons, rectangles, and VRAM transfers.
+- Software GPU: flat and textured polygons, rectangles, and VRAM transfers. In the
+  windowed build its rasterization runs on a dedicated worker thread by default, in
+  parallel with the emulation thread.
 - SPU audio: 24 ADPCM voices with ADSR, reverb, noise, pitch modulation, and
   volume sweeps, plus CD-DA and XA-ADPCM streaming.
 - CD-ROM: mounts `.bin`/`.cue`/`.iso`, boots real games through the retail BIOS.
@@ -64,8 +81,17 @@ formatted if the file does not exist), so the BIOS shell and games can save.
 The windowed emulator runs the console on a separate thread from the window, so
 input, video, and audio stay responsive even when emulation stalls, and a disc
 image on a slow or network filesystem is read ahead on a background thread rather
-than freezing the display. A disc swapped at runtime (see Scripted input) raises
-the drive-cover interrupt, so a running game notices the change.
+than freezing the display. GPU rasterization also runs on its own worker thread, so
+the drawing work for heavy scenes happens in parallel with the rest of the core
+rather than competing with it for the real-time frame budget; set
+`JONBOY_GPU_THREAD=0` to fall back to inline rasterization. The picture is presented
+at a 4:3 aspect ratio, pillarboxed or letterboxed when the window is resized away
+from 4:3. A disc swapped at runtime (see Scripted input) raises the drive-cover
+interrupt, so a running game notices the change.
+
+The headless, `--boot`, `--exe`, and `--gdb` modes keep a single-threaded,
+deterministic core (no worker threads), so reference traces and conformance stay
+bit-for-bit reproducible.
 
 ### Controls
 
