@@ -283,7 +283,17 @@ typedef struct {
 static uint16_t g_frame_buf[FRAME_BUFS][VRAM_HEIGHT * VRAM_WIDTH];
 static struct {
     int dx, dy, dw, dh, blank, bpp24;
+    // full = 1 when g_frame_buf holds a whole-VRAM column-major snapshot; 0 when
+    // it holds only the compact dw x dh display region. The producer sets it per
+    // frame so the consumer always transposes the layout that was actually
+    // published, even across an F1 toggle.
+    int full;
 } g_frame_meta[FRAME_BUFS];
+
+// Set by the main thread (F1) and read by the emu thread in publish_frame: when
+// the debug full-VRAM view is on, the producer must publish the whole snapshot,
+// not just the display region.
+static SDL_AtomicInt g_full_vram;
 
 // SPU output is 44.1 kHz stereo 16-bit. The audio device pulls on demand through
 // this callback, which runs on SDL's own audio thread and drains the SPU ring.
@@ -333,25 +343,57 @@ audio_callback(void *userdata, SDL_AudioStream *stream, int additional, int tota
 static void
 publish_frame(AppContext *app)
 {
-    // Publish a raw column-major snapshot of VRAM. vram.canvas is
-    // uint16_t[VRAM_WIDTH][VRAM_HEIGHT] and contiguous, so this is one flat copy.
-    // The expensive transpose to row-major for display is deferred to the main
-    // thread in present_frame, which is vsync-limited and has spare time. That
-    // keeps ~1.3 ms per frame of transpose off the emulation thread's real-time
-    // budget, which is what the audio ring depends on staying ahead of.
-    memcpy(g_frame_buf[app->produce_idx], vram.canvas,
-           (size_t)VRAM_WIDTH * VRAM_HEIGHT * sizeof(uint16_t));
+    // The display geometry the GPU currently shows. Present only the columns and
+    // scanlines the display range covers, so a mode that draws a smaller picture
+    // than it allows (Chrono Trigger's 224-line, sub-320-wide screens) does not
+    // leak the stale VRAM around the picture onto the screen.
+    int dx = gpu.disp_x;
+    int dy = gpu.disp_y;
+    int dw = psx_gpu_active_width();
+    int dh = psx_gpu_active_height();
+    int blank = gpu.disp_blank;
+    int bpp24 = gpu.disp_24bpp;
 
-    g_frame_meta[app->produce_idx].dx = gpu.disp_x;
-    g_frame_meta[app->produce_idx].dy = gpu.disp_y;
-    // Present only the columns and scanlines the display range covers, so a mode
-    // that draws a smaller picture than it allows (Chrono Trigger's 224-line,
-    // sub-320-wide screens) does not leak the stale VRAM around the picture onto
-    // the screen.
-    g_frame_meta[app->produce_idx].dw = psx_gpu_active_width();
-    g_frame_meta[app->produce_idx].dh = psx_gpu_active_height();
-    g_frame_meta[app->produce_idx].blank = gpu.disp_blank;
-    g_frame_meta[app->produce_idx].bpp24 = gpu.disp_24bpp;
+    // Clamp the region to the canvas so the compact copy below never reads past
+    // the end of VRAM.
+    if (dx < 0) dx = 0;
+    if (dy < 0) dy = 0;
+    if (dx > VRAM_WIDTH) dx = VRAM_WIDTH;
+    if (dy > VRAM_HEIGHT) dy = VRAM_HEIGHT;
+    if (dx + dw > VRAM_WIDTH) dw = VRAM_WIDTH - dx;
+    if (dy + dh > VRAM_HEIGHT) dh = VRAM_HEIGHT - dy;
+    if (dw < 0) dw = 0;
+    if (dh < 0) dh = 0;
+
+    // Normal 15-bit gameplay needs only the display rectangle, so copy just that
+    // (~150 KB) instead of the whole 1 MB VRAM, keeping the difference off the
+    // emulation thread's real-time budget that the audio ring depends on. The
+    // full snapshot is still published for the debug view (F1), for 24-bit
+    // display (whose unpack reads a wider, packed span), and when blank, where
+    // the compact region would not be enough. The transpose to row-major is
+    // deferred to present_frame on the vsync-limited main thread either way.
+    int full = SDL_GetAtomicInt(&g_full_vram) || bpp24 || blank || dw == 0 || dh == 0;
+
+    if (full) {
+        memcpy(g_frame_buf[app->produce_idx], vram.canvas,
+               (size_t)VRAM_WIDTH * VRAM_HEIGHT * sizeof(uint16_t));
+    } else {
+        // vram.canvas is column-major, so each display column is dh contiguous
+        // words: copy the region as dw such segments.
+        uint16_t *dst = g_frame_buf[app->produce_idx];
+        for (int x = 0; x < dw; x++) {
+            memcpy(&dst[(size_t)x * dh], &vram.canvas[dx + x][dy],
+                   (size_t)dh * sizeof(uint16_t));
+        }
+    }
+
+    g_frame_meta[app->produce_idx].dx = dx;
+    g_frame_meta[app->produce_idx].dy = dy;
+    g_frame_meta[app->produce_idx].dw = dw;
+    g_frame_meta[app->produce_idx].dh = dh;
+    g_frame_meta[app->produce_idx].blank = blank;
+    g_frame_meta[app->produce_idx].bpp24 = bpp24;
+    g_frame_meta[app->produce_idx].full = full;
 
     // SDL_SetAtomicInt is an atomic exchange with a full memory barrier, so the
     // buffer writes above are visible to the main thread once it reads the fresh
@@ -376,11 +418,49 @@ present_frame(AppContext *app)
     SDL_RenderClear(app->renderer);
 
     if (app->have_frame) {
-        // The published buffer is a column-major VRAM snapshot (snap[x*H + y]).
-        // Transpose it to row-major here, on the main thread, so the emu thread
-        // does not pay for it. The display paths below read this row-major copy.
-        static uint16_t rowmajor[VRAM_HEIGHT * VRAM_WIDTH];
         const uint16_t *snap = g_frame_buf[app->consume_idx];
+        int dx = g_frame_meta[app->consume_idx].dx;
+        int dy = g_frame_meta[app->consume_idx].dy;
+        int dw = g_frame_meta[app->consume_idx].dw;
+        int dh = g_frame_meta[app->consume_idx].dh;
+
+        if (!g_frame_meta[app->consume_idx].full) {
+            // Fast path: snap holds only the compact column-major dw x dh display
+            // region (snap[x*dh + y]). Transpose just that rectangle to row-major
+            // and upload it to the top-left of the texture, then render it. This
+            // is ~0.15 ms instead of the ~1.24 ms a whole-VRAM transpose costs.
+            static uint16_t region[VRAM_HEIGHT * VRAM_WIDTH];
+            for (int y = 0; y < dh; y++) {
+                uint16_t *row = &region[(size_t)y * dw];
+                for (int x = 0; x < dw; x++) {
+                    row[x] = snap[(size_t)x * dh + y];
+                }
+            }
+
+            void *pixels;
+            int pitch;
+            SDL_Rect area = { 0, 0, dw, dh };
+            if (dw > 0 && dh > 0
+                && SDL_LockTexture(app->vram_texture, &area, &pixels, &pitch)) {
+                uint8_t *dst = pixels;
+                for (int y = 0; y < dh; y++) {
+                    memcpy(dst + (size_t)y * pitch,
+                           &region[(size_t)y * dw],
+                           (size_t)dw * sizeof(uint16_t));
+                }
+                SDL_UnlockTexture(app->vram_texture);
+            }
+
+            SDL_FRect src = { 0.0f, 0.0f, (float)dw, (float)dh };
+            SDL_RenderTexture(app->renderer, app->vram_texture, &src, NULL);
+            SDL_RenderPresent(app->renderer);
+            return;
+        }
+
+        // Full-snapshot path (debug view, 24-bit display, or blank): the buffer
+        // is a whole-VRAM column-major snapshot (snap[x*H + y]). Transpose all of
+        // it to row-major, which the display paths below read.
+        static uint16_t rowmajor[VRAM_HEIGHT * VRAM_WIDTH];
         for (int y = 0; y < VRAM_HEIGHT; y++) {
             uint16_t *row = &rowmajor[(size_t)y * VRAM_WIDTH];
             for (int x = 0; x < VRAM_WIDTH; x++) {
@@ -400,11 +480,6 @@ present_frame(AppContext *app)
             }
             SDL_UnlockTexture(app->vram_texture);
         }
-
-        int dx = g_frame_meta[app->consume_idx].dx;
-        int dy = g_frame_meta[app->consume_idx].dy;
-        int dw = g_frame_meta[app->consume_idx].dw;
-        int dh = g_frame_meta[app->consume_idx].dh;
 
         if (app->full_vram_view) {
             // Debug view: the entire 1024x512 VRAM stretched to the window.
@@ -687,6 +762,9 @@ jonboy_runapp(int argc, char *argv[])
                     SDL_SetAtomicInt(&app.running, 0);
                 } else if (event.key.key == SDLK_F1) {
                     app.full_vram_view = !app.full_vram_view;
+                    // Tell the emu thread to publish the whole VRAM snapshot the
+                    // debug view needs, instead of just the display region.
+                    SDL_SetAtomicInt(&g_full_vram, app.full_vram_view);
                 } else if (event.key.key == SDLK_TAB && !event.key.repeat) {
                     pad_toggle_analog(); // ANALOG button
                     printf("Pad analog mode %s\n",

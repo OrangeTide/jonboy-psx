@@ -70,3 +70,30 @@ Notes:
   the kind of case the optimization work needs to pull back under budget.
 - W2 sits near 1.67x real-time with essentially no over-budget frames, but this
   window is still early (menu and intro), not a heavy battle.
+
+### 2026-11-11, shrink the windowed publish copy and present transpose
+
+Optimizations 1 and 2: publish and transpose only the display rectangle for
+normal 15-bit gameplay, instead of the whole 1024x512 VRAM. The debug F1 view,
+24-bit FMV, and blank frames keep the full-VRAM path, selected by a per-frame
+flag so the consumer always reads the layout that was published.
+
+This affects the windowed build only, so `--bench` (headless, no present) does
+not show it. Measured instead with an operation-level microbench of the two
+copies, full VRAM versus a 320x240 display region, on the baseline host:
+
+| operation          | full VRAM | display region | thread            | saved/frame |
+|--------------------|-----------|----------------|-------------------|-------------|
+| publish memcpy (1) | 0.084 ms  | 0.018 ms       | emu (audio path)  | ~0.066 ms   |
+| transpose (2)      | 1.238 ms  | 0.152 ms       | main (vsync)      | ~1.09 ms    |
+
+The emulation-thread saving (1) is small in absolute terms but comes off the
+budget the audio ring depends on. The larger saving (2) is on the main thread,
+which is vsync limited and had slack, so it buys present and input-latency
+headroom rather than audio headroom. The two share one region restructure, which
+is why they land together.
+
+Correctness: the compact path is pixel-identical to the full path for the
+display rectangle (both resolve to the same column-major source index). Verified
+in the running window: the BIOS boot logo (15-bit, compact path) and the Chrono
+Trigger intro (full path) both render correctly, no garbage, offset, or tint.
