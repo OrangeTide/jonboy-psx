@@ -144,4 +144,13 @@ extern R3051_CPU cpu;
 void cpu_reset(uint32_t start_pc);
 void step_cpu(void);
 
+// Default hardware-tick batch size for the real-time windowed build and the
+// benchmark. 0 keeps exact per-instruction timing; the deterministic run modes
+// use 0. N batches the per-step hardware advance and interrupt poll to every
+// N-th instruction, trading up to N-1 instructions of interrupt latency for less
+// fixed per-instruction cost. JONBOY_FASTTICK overrides it at runtime.
+#define CPU_FASTTICK_DEFAULT 8
+extern int cpu_fasttick_n;
+void cpu_set_fasttick(int n);
+
 #endif

@@ -13,6 +13,18 @@
 
 R3051_CPU cpu;
 
+// Hardware-tick batch size for step_cpu: 0 is exact per-instruction, N>=2 batches
+// the hardware advance and interrupt poll to every N-th instruction. Run modes
+// set it (see cpu_set_fasttick); the default is exact so a core used without a
+// run mode stays deterministic.
+int cpu_fasttick_n = 0;
+
+void
+cpu_set_fasttick(int n)
+{
+    cpu_fasttick_n = n < 0 ? 0 : n;
+}
+
 void
 cpu_reset(uint32_t start_pc)
 {
@@ -165,22 +177,26 @@ step_cpu(void)
     // step is recognized at the boundary check just below. The scheduler only
     // runs the device fan-out when an event is due, not on every step.
     //
-    // PROTOTYPE (JONBOY_FASTTICK=N): the per-instruction hardware tick and
-    // interrupt check are the largest fixed per-instruction cost after the
-    // instruction itself. Batching them to every N-th instruction (a proxy for a
-    // block-cached interpreter that ticks at block boundaries) advances the same
-    // total cycles in bulk, so timing stays correct, but coarsens interrupt
-    // latency by up to N-1 instructions. Default (N unset / 0) keeps the exact
-    // per-instruction behavior, so headless determinism and conformance are
-    // unchanged unless the mode is explicitly enabled.
-    static int fast_n = -1;
+    // Hardware-tick batching (cpu_set_fasttick): advance the hardware clock and
+    // poll for interrupts once every N instructions instead of every one,
+    // advancing the same total cycles in bulk. Timing stays correct (the device
+    // ticks take a cycle count and N*2 cycles is far under a frame, so no event
+    // is spanned twice), but interrupt and timer-read latency coarsen by up to
+    // N-1 instructions. The real-time windowed build and the benchmark enable it;
+    // the deterministic modes (headless, exe, boot, gdb) leave it at 0 for exact
+    // per-instruction behavior, so conformance and the boot regression are
+    // unchanged. JONBOY_FASTTICK in the environment overrides the mode's choice.
+    static int env_fast = -2; // -2 unread, -1 unset (use the runtime setting)
 
-    if (fast_n < 0) {
+    if (env_fast == -2) {
         const char *e = getenv("JONBOY_FASTTICK");
-        fast_n = e ? atoi(e) : 0;
-        if (fast_n < 1) {
-            fast_n = 0;
-        }
+        env_fast = e ? atoi(e) : -1;
+    }
+
+    int fast_n = env_fast >= 0 ? env_fast : cpu_fasttick_n;
+
+    if (fast_n < 1) {
+        fast_n = 0;
     }
 
     static unsigned tick_batch = 0;

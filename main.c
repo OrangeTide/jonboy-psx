@@ -768,6 +768,10 @@ jonboy_runapp(int argc, char *argv[])
 
     // Start execution at the CPU reset vector (BIOS entry point).
     cpu_reset(0xBFC00000);
+    // Real-time build: batch the per-step hardware tick and interrupt poll for
+    // throughput. The deterministic run modes (headless, exe, boot, gdb) leave
+    // this off so conformance and the boot regression stay bit-exact.
+    cpu_set_fasttick(CPU_FASTTICK_DEFAULT);
 
     // Prefetch CD sectors on a worker thread so a slow disc image (for example
     // one on a network mount) never blocks input and rendering on an fread. Only
@@ -1325,6 +1329,9 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
 
     cpu_reset(0xBFC00000);
     cpu.halt_on_break = g_sideload_exe ? 0 : 1;
+    // Measure the real-time runtime, which batches the hardware tick, so the
+    // benchmark reflects the windowed build. JONBOY_FASTTICK still overrides.
+    cpu_set_fasttick(CPU_FASTTICK_DEFAULT);
 
     int service_active = (g_sideload_exe != NULL) || (g_games_dir != NULL);
     int kernel_up = 0, sideloaded = 0;

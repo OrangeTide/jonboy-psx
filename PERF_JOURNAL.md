@@ -128,3 +128,35 @@ the Chrono Trigger intro is a 24-bit FMV on the full path, while a 15-bit screen
 transposes only its region. The transpose cost is real but lands on the main
 thread, which has the whole 16.67 ms in parallel, so it is headroom there rather
 than pressure on the audio budget.
+
+### 2026-11-11, enable hardware-tick batching (FASTTICK=8)
+
+Optimization 3: batch the per-step hardware clock advance and interrupt poll to
+every 8th instruction instead of every one. The deadline scheduler already makes
+the per-step tick cheap, so the saving is mostly the per-instruction COP0
+interrupt check; it is larger on CPU-bound work and smaller when a frame is
+dominated by GPU raster or FMV. The real-time windowed build and the benchmark
+turn it on; the deterministic modes (headless, exe, boot, gdb) stay at 0, so
+conformance (29/29) and the boot regression remain bit-exact. JONBOY_FASTTICK
+overrides the choice.
+
+Chosen N by a clean A/B on W2 (three trials each, budget mean in ms):
+
+| N  | trial 1 | trial 2 | trial 3 | mean    |
+|----|---------|---------|---------|---------|
+| 0  | 10.12   | 10.10   | 10.19   | 10.14   |
+| 8  |  9.53   |  9.64   |  9.61   |  9.59   |
+
+That is a steady ~5% on this GPU-heavy window (N=8 beat N=0 in every trial);
+N=8 coarsens interrupt latency by at most 7 instructions (~14 cycles), which is
+within the variation of real hardware. Larger N returned no reliable further gain
+here and only widens that latency, so 8 is the pick.
+
+Correctness: windowed Chrono Trigger boots into the intro with N=8 and renders
+correctly; the deterministic suites are untouched.
+
+Post-change baseline (default build, N=8 now active in --bench):
+
+| workload   | budget mean | over budget | transpose mean |
+|------------|-------------|-------------|----------------|
+| W2 ct-intro | ~9.6 ms     | low         | 1.24 ms (full) |
