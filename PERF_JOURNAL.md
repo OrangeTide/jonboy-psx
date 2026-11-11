@@ -234,3 +234,38 @@ This confirms the threaded GPU delivers the predicted payoff on polygon workload
 It stays off by default pending the remaining polish (gpu_status safety, a proper
 worker wakeup instead of the spins, and a readback-fence stress), tracked in
 docs/threaded-gpu.md.
+
+### 2026-11-11, GPU worker parks instead of spinning when idle
+
+Replaced the three busy-waits in the threaded GPU path (the worker's SDL_Delay(0)
+idle, the gpu_sync fence, and the ring-full backpressure) with a condition-variable
+wakeup. The ring stays lock-free on the hot path; the lock is taken only when the
+worker parks or a producer waits for a drain. A seq_cst handshake between the
+producer's gpuq_pushed store and the worker's gpuq_worker_sleeping flag makes the
+wake race-free, so a command queued just as the worker parks is never missed. The
+worker does a short bounded spin before parking so the sub-microsecond gaps between
+command bursts within a busy frame do not cost a park and a syscall each.
+
+Per-thread CPU during the Chrono Trigger intro (a 24-bit FMV, raster ~1%, so the
+GPU worker is almost idle while the emulation thread is busy with CPU and MDEC),
+sampled from /proc over a 4 s window, worker enabled:
+
+| thread        | before (spin) | after (park) |
+|---------------|---------------|--------------|
+| jonboy-gpu    | ~100% of a core (busy-yield) | 10% of a core |
+| jonboy-emu    | 66% of a core | 66% of a core |
+
+The emulation-thread budget (65%) and audio underruns (0) are unchanged, as
+expected: the change is pure CPU efficiency, giving back most of a core on scenes
+where the GPU worker has little to do, not a change to the per-frame budget. The
+"before" figure is the SDL_Delay(0) busy-yield, which returns immediately when no
+other thread wants the core and so pegs it.
+
+On the BIOS menu (the rotating "PS" diamond animates continuously at real polygon
+cost) the worker holds ~50% of a core in both builds, confirming the 50% is genuine
+rasterization, not a spin. The change touches only the idle path, so a scene that
+keeps the worker busy is unaffected.
+
+Validation: the differential test (make gpu-thread-test) now runs the same
+park/wake loop the windowed build uses and stays byte-identical to the synchronous
+path, clean under ThreadSanitizer. Conformance 29/29 (flag off, synchronous).

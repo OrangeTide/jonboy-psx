@@ -125,18 +125,17 @@ build_stream(void)
     }
 }
 
-// Worker thread for the threaded run: drain the ring until told to stop.
-static atomic_int worker_stop;
-
+// Worker thread for the threaded run: drain the ring until told to stop, parking
+// on the condition variable when idle. This is the same loop the windowed build
+// runs, so the test also covers the wakeup handshake.
 static void *
 worker_main(void *arg)
 {
     (void)arg;
 
-    while (!atomic_load(&worker_stop)) {
+    while (!gpu_worker_should_stop()) {
         if (!gpu_worker_pop_and_run()) {
-            struct timespec ts = { 0, 1000 }; // 1 us idle, not a hot spin
-            nanosleep(&ts, NULL);
+            gpu_worker_wait();
         }
     }
     while (gpu_worker_pop_and_run()) {
@@ -171,7 +170,7 @@ main(void)
     // Threaded: the same words go through the ring to a real worker thread.
     reset_gpu();
     gpu_threaded = 1;
-    atomic_store(&worker_stop, 0);
+    gpu_worker_reset();
 
     pthread_t t;
     if (pthread_create(&t, NULL, worker_main, NULL) != 0) {
@@ -182,7 +181,7 @@ main(void)
         gpu_submit_gp0(stream[i]);
     }
     gpu_sync();                    // drain: the worker has run every word
-    atomic_store(&worker_stop, 1);
+    gpu_worker_request_stop();
     pthread_join(t, NULL);
     memcpy(snap_thread, vram.canvas, sizeof snap_thread);
     gpu_threaded = 0;

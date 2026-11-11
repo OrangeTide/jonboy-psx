@@ -98,4 +98,16 @@ extern int gpu_threaded;
 void gpu_submit_gp0(uint32_t word);
 int gpu_worker_pop_and_run(void);
 void gpu_sync(void);
+
+// Worker lifecycle and blocking idle wait, so an idle worker sleeps on a condition
+// variable instead of spinning and a drain fence blocks instead of busy-waiting.
+// gpu_worker_reset clears the stop flag before the worker thread is created. The
+// worker loop calls gpu_worker_pop_and_run, and gpu_worker_wait when it returns 0;
+// gpu_worker_wait sleeps until a command is queued or a stop is requested.
+// gpu_worker_request_stop sets the stop flag and wakes the worker (and any producer
+// blocked on a fence); gpu_worker_should_stop reports it.
+void gpu_worker_reset(void);
+void gpu_worker_wait(void);
+void gpu_worker_request_stop(void);
+int gpu_worker_should_stop(void);
 #endif

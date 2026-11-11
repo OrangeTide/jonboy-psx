@@ -3,6 +3,7 @@
 
 #include <stdatomic.h>
 #include <time.h>
+#include <pthread.h>
 
 PSX_GPU gpu;
 
@@ -52,9 +53,66 @@ static uint32_t gpuq_buf[GPUQ_SIZE];
 static _Atomic uint64_t gpuq_pushed = 0; // words submitted by the producer
 static _Atomic uint64_t gpuq_done = 0;   // words consumed by the worker
 
+// Wakeup state. The ring itself stays lock-free on the hot path (submit and pop
+// touch no lock). The mutex and condition variables are taken only on the slow
+// paths, when the worker has nothing to do, when a fence waits for a drain, or
+// when the ring is full, so an idle worker or a draining producer sleeps instead
+// of burning a core. gpuq_worker_sleeping gates the producer's wake: it signals
+// the worker only when the worker has actually parked, which the seq_cst handshake
+// on gpuq_pushed below makes race-free.
+static pthread_mutex_t gpuq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t gpuq_not_empty = PTHREAD_COND_INITIALIZER; // worker parks here
+static pthread_cond_t gpuq_drained = PTHREAD_COND_INITIALIZER;   // fence/backpressure parks here
+static _Atomic int gpuq_worker_sleeping = 0; // worker parked on gpuq_not_empty
+static _Atomic int gpuq_waiters = 0;         // producers parked on gpuq_drained
+static _Atomic int gpuq_stop = 0;            // shutdown requested
+
+// Spin this many times before parking, so the sub-microsecond gaps between command
+// bursts within a busy frame do not cost a park and a syscall each.
+#define GPUQ_SPIN 2048
+
+#if defined(__i386__) || defined(__x86_64__)
+#define gpuq_relax() __builtin_ia32_pause()
+#else
+#define gpuq_relax() ((void)0)
+#endif
+
+// True when the worker has consumed every submitted word. Only the worker calls
+// this, so the relaxed load of gpuq_done (which only the worker writes) is enough;
+// gpuq_pushed is seq_cst to pair with the sleep handshake in gpu_worker_wait.
+static inline int
+gpuq_empty(void)
+{
+    return atomic_load_explicit(&gpuq_done, memory_order_relaxed)
+           == atomic_load_explicit(&gpuq_pushed, memory_order_seq_cst);
+}
+
+// Producer side of backpressure: the ring is full, so park until the worker drains
+// it. The worker signals gpuq_drained when it reaches empty. Rare: the ring holds
+// a whole frame of commands, and a full ring means the workload is GPU-bound.
+static void
+gpuq_wait_for_space(void)
+{
+    pthread_mutex_lock(&gpuq_lock);
+    atomic_fetch_add_explicit(&gpuq_waiters, 1, memory_order_relaxed);
+
+    // Make sure the worker is running so it can free a slot.
+    if (atomic_load_explicit(&gpuq_worker_sleeping, memory_order_seq_cst)) {
+        pthread_cond_signal(&gpuq_not_empty);
+    }
+    while (atomic_load_explicit(&gpuq_pushed, memory_order_relaxed)
+           - atomic_load_explicit(&gpuq_done, memory_order_acquire) >= GPUQ_SIZE
+           && !atomic_load_explicit(&gpuq_stop, memory_order_acquire)) {
+        pthread_cond_wait(&gpuq_drained, &gpuq_lock);
+    }
+
+    atomic_fetch_sub_explicit(&gpuq_waiters, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&gpuq_lock);
+}
+
 // Producer (emulation thread): run a GP0 word now when synchronous, else hand it
-// to the worker. Blocks only if the ring is full, which is the intended
-// backpressure when the worker cannot keep up.
+// to the worker. Blocks only if the ring is full (backpressure). After publishing
+// the word it wakes the worker if it is parked.
 void
 gpu_submit_gp0(uint32_t word)
 {
@@ -67,11 +125,21 @@ gpu_submit_gp0(uint32_t word)
 
     while (head - atomic_load_explicit(&gpuq_done, memory_order_acquire)
            >= GPUQ_SIZE) {
-        /* ring full: spin until the worker frees a slot */
+        gpuq_wait_for_space();
     }
 
     gpuq_buf[head & GPUQ_MASK] = word;
-    atomic_store_explicit(&gpuq_pushed, head + 1, memory_order_release);
+    // seq_cst so this store is ordered against the worker's seq_cst sleep handshake
+    // (store gpuq_worker_sleeping, then re-check gpuq_empty). Either the worker sees
+    // this word and does not park, or the load below sees it parked and wakes it, so
+    // a word submitted just as the worker parks is never missed.
+    atomic_store_explicit(&gpuq_pushed, head + 1, memory_order_seq_cst);
+
+    if (atomic_load_explicit(&gpuq_worker_sleeping, memory_order_seq_cst)) {
+        pthread_mutex_lock(&gpuq_lock);
+        pthread_cond_signal(&gpuq_not_empty);
+        pthread_mutex_unlock(&gpuq_lock);
+    }
 }
 
 // Consumer (GPU worker): run one queued GP0 word. Returns 0 when the ring is
@@ -90,9 +158,51 @@ gpu_worker_pop_and_run(void)
     return 1;
 }
 
+// Consumer (GPU worker): called by the worker loop when gpu_worker_pop_and_run
+// returns 0. The ring is empty, so wake any fence or backpressure waiter, then
+// park on gpuq_not_empty until a word is queued or a stop is requested, instead of
+// spinning. A short bounded spin first absorbs the brief gaps within a busy frame.
+void
+gpu_worker_wait(void)
+{
+    for (int i = 0; i < GPUQ_SPIN; i++) {
+        if (!gpuq_empty()
+            || atomic_load_explicit(&gpuq_stop, memory_order_acquire)) {
+            return;
+        }
+        gpuq_relax();
+    }
+
+    pthread_mutex_lock(&gpuq_lock);
+
+    // The ring just reached empty: a fence waiter (gpu_sync) or a backpressure
+    // waiter can make progress now.
+    if (atomic_load_explicit(&gpuq_waiters, memory_order_relaxed) > 0) {
+        pthread_cond_broadcast(&gpuq_drained);
+    }
+
+    for (;;) {
+        // Publish "parked" before the final emptiness re-check. The producer's
+        // seq_cst store of gpuq_pushed and this seq_cst store/load pair guarantee a
+        // word queued concurrently is either seen here (we do not park) or seen by
+        // the producer as parked (it signals). See gpu_submit_gp0.
+        atomic_store_explicit(&gpuq_worker_sleeping, 1, memory_order_seq_cst);
+
+        if (!gpuq_empty()
+            || atomic_load_explicit(&gpuq_stop, memory_order_acquire)) {
+            break;
+        }
+        pthread_cond_wait(&gpuq_not_empty, &gpuq_lock);
+    }
+
+    atomic_store_explicit(&gpuq_worker_sleeping, 0, memory_order_relaxed);
+    pthread_mutex_unlock(&gpuq_lock);
+}
+
 // Producer-side fence: wait until the worker has consumed every word submitted so
 // far. The acquire on gpuq_done makes all of the worker's VRAM writes up to that
-// point visible to this thread, so a VRAM read after gpu_sync is consistent.
+// point visible to this thread, so a VRAM read after gpu_sync is consistent. The
+// worker signals gpuq_drained when it reaches empty (gpu_worker_wait).
 void
 gpu_sync(void)
 {
@@ -102,9 +212,47 @@ gpu_sync(void)
 
     uint64_t target = atomic_load_explicit(&gpuq_pushed, memory_order_relaxed);
 
-    while (atomic_load_explicit(&gpuq_done, memory_order_acquire) < target) {
-        /* spin until the worker catches up */
+    if (atomic_load_explicit(&gpuq_done, memory_order_acquire) >= target) {
+        return; // fast path: already drained, no lock
     }
+
+    pthread_mutex_lock(&gpuq_lock);
+    atomic_fetch_add_explicit(&gpuq_waiters, 1, memory_order_relaxed);
+    if (atomic_load_explicit(&gpuq_worker_sleeping, memory_order_seq_cst)) {
+        pthread_cond_signal(&gpuq_not_empty);
+    }
+    while (atomic_load_explicit(&gpuq_done, memory_order_acquire) < target) {
+        pthread_cond_wait(&gpuq_drained, &gpuq_lock);
+    }
+    atomic_fetch_sub_explicit(&gpuq_waiters, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&gpuq_lock);
+}
+
+// Clear the stop flag and park state before the worker thread is created.
+void
+gpu_worker_reset(void)
+{
+    atomic_store_explicit(&gpuq_stop, 0, memory_order_relaxed);
+    atomic_store_explicit(&gpuq_worker_sleeping, 0, memory_order_relaxed);
+    atomic_store_explicit(&gpuq_waiters, 0, memory_order_relaxed);
+}
+
+// Ask the worker to stop and wake everyone parked, so the worker leaves
+// gpu_worker_wait and any producer leaves a fence or backpressure wait.
+void
+gpu_worker_request_stop(void)
+{
+    pthread_mutex_lock(&gpuq_lock);
+    atomic_store_explicit(&gpuq_stop, 1, memory_order_release);
+    pthread_cond_broadcast(&gpuq_not_empty);
+    pthread_cond_broadcast(&gpuq_drained);
+    pthread_mutex_unlock(&gpuq_lock);
+}
+
+int
+gpu_worker_should_stop(void)
+{
+    return atomic_load_explicit(&gpuq_stop, memory_order_acquire);
 }
 
 void

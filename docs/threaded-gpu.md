@@ -279,9 +279,19 @@ thread, with fences where the CPU looks at the result.
      gpu_status bits that GPUSTAT reads on the emulation thread, a benign race
      today (games poll the ready bits, which are always set) but to be made clean
      (publish or atomic) before the flag goes on by default.
-   - Replace the spin waits (gpu_sync, ring-full backpressure) and the worker's
-     SDL_Delay(0) idle with a proper wakeup (semaphore or condvar), so a drain
-     does not burn a core.
+   - Replace the spin waits with a proper wakeup: done. The worker now parks on a
+     condition variable (`gpuq_not_empty`) when the ring drains, after a short
+     bounded spin that absorbs the sub-microsecond gaps between command bursts in a
+     busy frame; the producer wakes it with a seq_cst handshake on `gpuq_pushed` and
+     a `gpuq_worker_sleeping` flag, so the lock is touched only on the empty-to-
+     non-empty transition and a word queued just as the worker parks is never
+     missed. The fence (`gpu_sync`) and the ring-full backpressure now park on
+     `gpuq_drained`, which the worker signals when it reaches empty, instead of
+     busy-waiting. Measured on the Chrono Trigger intro FMV (raster ~1%): the worker
+     thread fell from a full busy-yield core to about 10% of a core, with the
+     emulation-thread budget and zero audio underruns unchanged. Clean under
+     ThreadSanitizer and the differential test (which now runs the same park/wake
+     loop).
    - Measure the emulation-thread budget drop with the windowed `JONBOY_PERF` HUD
      under a heavy scene, and record it against the step 0 raster baseline. Done:
      on the BIOS boot logo the emulation thread's budget share fell from 95-98% to

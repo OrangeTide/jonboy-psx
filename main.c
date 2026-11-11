@@ -262,7 +262,6 @@ typedef struct {
     // and vice versa. The main thread owns events, input, and presentation.
     SDL_Thread *emu;
     SDL_Thread *gpu_worker;    // GPU rasterization worker (NULL unless threaded)
-    SDL_AtomicInt gpu_stop;    // 1 stops the GPU worker, set after the emu thread joins
     SDL_AtomicInt running;     // 0 stops the emu thread (set by the main thread)
 
     // Frame handoff: a lock-free triple buffer. The emu thread transposes VRAM
@@ -437,9 +436,10 @@ gpu_worker_thread(void *data)
 {
     AppContext *app = data;
 
-    while (!SDL_GetAtomicInt(&app->gpu_stop)) {
+    (void)app;
+    while (!gpu_worker_should_stop()) {
         if (!gpu_worker_pop_and_run()) {
-            SDL_Delay(0); // ring empty: yield rather than spin hot
+            gpu_worker_wait(); // ring empty: park until a command or stop, not a spin
         }
     }
     while (gpu_worker_pop_and_run()) {
@@ -819,8 +819,8 @@ jonboy_runapp(int argc, char *argv[])
     // Off by default while the path is validated. Start it before the emu thread
     // so the first submitted commands have a consumer.
     gpu_threaded = getenv("JONBOY_GPU_THREAD") != NULL;
-    SDL_SetAtomicInt(&app.gpu_stop, 0);
     if (gpu_threaded) {
+        gpu_worker_reset();
         app.gpu_worker = SDL_CreateThread(gpu_worker_thread, "jonboy-gpu", &app);
         if (!app.gpu_worker) {
             SDL_Log("Failed to start GPU worker: %s", SDL_GetError());
@@ -917,7 +917,7 @@ jonboy_runapp(int argc, char *argv[])
     // Stop the GPU worker only after the emu thread has joined, so no more GP0
     // commands are submitted while it drains and exits.
     if (app.gpu_worker) {
-        SDL_SetAtomicInt(&app.gpu_stop, 1);
+        gpu_worker_request_stop();
         SDL_WaitThread(app.gpu_worker, NULL);
     }
     cdrom_io_stop();
