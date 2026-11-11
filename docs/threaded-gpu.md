@@ -283,7 +283,10 @@ thread, with fences where the CPU looks at the result.
      SDL_Delay(0) idle with a proper wakeup (semaphore or condvar), so a drain
      does not burn a core.
    - Measure the emulation-thread budget drop with the windowed `JONBOY_PERF` HUD
-     under a heavy scene, and record it against the step 0 raster baseline.
+     under a heavy scene, and record it against the step 0 raster baseline. Done:
+     on the BIOS boot logo the emulation thread's budget share fell from 95-98% to
+     56-57% and audio underruns went from up to 8/s to 0 (PERF_JOURNAL.md). The
+     payoff is confirmed; the items above are what remain before default-on.
 5. Turn it on by default for the windowed build once the above are done.
 
 ## Expected payoff and how it is measured

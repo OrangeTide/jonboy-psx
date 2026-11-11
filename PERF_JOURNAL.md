@@ -208,3 +208,29 @@ Caveat: the profiling adds two clock reads per completed GP0 command, which
 slightly inflates the budget during a profiled run. The raster *share* (raster /
 budget, both measured in the same run) is robust to this; the absolute budget in
 these rows is marginally higher than an unprofiled run.
+
+### 2026-11-11, threaded GPU windowed perf measurement
+
+With the GPU worker built (JONBOY_GPU_THREAD, docs/threaded-gpu.md), measure what
+it buys on the live windowed build, using the JONBOY_PERF HUD on the BIOS boot
+logo (the heaviest raster case, ~40% of budget). The HUD reports the emulation
+thread's share of the real-time budget and audio underruns per second. Comparing
+the animated-logo phase (the heavy polygon phase of each run):
+
+| build        | emu-thread budget | audio underruns/s |
+|--------------|-------------------|-------------------|
+| synchronous  | 95-98%            | 1-8               |
+| threaded     | 56-57%            | 0                 |
+
+Moving rasterization to the worker dropped the emulation thread's budget share by
+about 40 points during the heavy scene, matching the 40% raster share from step 0,
+and eliminated the audio underruns the synchronous build hit when it saturated.
+The light early-boot phase is similar in both, since there is little raster to
+offload. The spin-based gpu_sync fence cost no measurable time here, as expected:
+the worker's ~40% of the frame finishes before the emulation thread's ~60% of
+non-raster work, so the present fence rarely waits.
+
+This confirms the threaded GPU delivers the predicted payoff on polygon workloads.
+It stays off by default pending the remaining polish (gpu_status safety, a proper
+worker wakeup instead of the spins, and a readback-fence stress), tracked in
+docs/threaded-gpu.md.
