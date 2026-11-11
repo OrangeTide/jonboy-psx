@@ -227,10 +227,13 @@ thread, with fences where the CPU looks at the result.
 
 ## Testing
 
-- **Differential test.** Run a recorded command stream (a game's GP0/GP1 trace, or
-  a boot) through both the synchronous and threaded paths and assert the final
-  VRAM is identical. This is the primary correctness gate and catches a missed
-  fence directly. The headless `--vram-out` dump gives the comparison image.
+- **Differential test (built).** `make gpu-thread-test` replays a deterministic
+  command stream through both the synchronous path and the ring plus a real worker
+  thread and asserts byte-identical VRAM. It runs clean under ThreadSanitizer.
+  This is the primary correctness gate for the threading machinery. It covers
+  VRAM-write equivalence and the ring, worker, and drain under real concurrency;
+  it does not yet emit a GP0 0xC0 readback, so the readback fence still wants a
+  separate stress (a game trace, or a stream that reads VRAM back and compares).
 - **Readback-heavy workload.** The 24-bit FMV path (Lunar) exercises CPU-to-VRAM
   and VRAM reads heavily and is the natural stress test for the fences. The MDEC
   tests feed the GPU through DMA and are a second check.
@@ -261,10 +264,17 @@ thread, with fences where the CPU looks at the result.
    correctly with the worker on, no tearing, clean shutdown. Conformance stays
    29/29 with the flag off.
 4. Remaining before default-on:
-   - Differential test: run a command stream through both paths and assert the
-     final VRAM is byte-identical, the primary correctness gate.
+   - Differential test: done. `make gpu-thread-test` (test_gpu_thread.c) replays a
+     deterministic ~31k-word stream (fills, polygons, gouraud, CPU-to-VRAM
+     uploads, VRAM-to-VRAM copies) through both the synchronous path and the ring
+     plus a real worker thread, and asserts the final VRAM is byte-identical. It
+     passes repeatedly and is clean under ThreadSanitizer (`setarch -R` with
+     `-fsanitize=thread`), which confirms the release/acquire ring ordering and
+     the gpu_sync happens-before have no data race.
    - Readback-heavy validation (Lunar 24-bit FMV, MDEC tests) to exercise the
-     readback fence hard.
+     readback fence hard. The differential test covers VRAM-write equivalence and
+     the ring/worker/drain concurrency; it does not emit GP0 0xC0 readback, so the
+     readback fence still wants a dedicated stress.
    - Make gpu_status access safe. GP0 0xE1 (texpage) on the worker updates
      gpu_status bits that GPUSTAT reads on the emulation thread, a benign race
      today (games poll the ready bits, which are always set) but to be made clean
