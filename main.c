@@ -340,13 +340,19 @@ audio_callback(void *userdata, SDL_AudioStream *stream, int additional, int tota
 // and publish it. The exchange hands the just-written buffer to the main thread
 // (as the fresh slot) and takes back whichever buffer the slot held, all without
 // a lock and without waiting on the main thread.
+
+// Compute the display region the producer publishes this frame: origin (dx,dy)
+// and size (dw,dh) clamped to VRAM, the blank and 24-bit flags, and whether a
+// full-VRAM snapshot is needed (debug view, 24-bit, blank, or an empty region)
+// instead of just the compact region. Shared by publish_frame and the benchmark
+// so their copy sizes match exactly.
 static void
-publish_frame(AppContext *app)
+frame_display_region(int *dx_o, int *dy_o, int *dw_o, int *dh_o,
+                     int *blank_o, int *bpp24_o, int *full_o)
 {
-    // The display geometry the GPU currently shows. Present only the columns and
-    // scanlines the display range covers, so a mode that draws a smaller picture
-    // than it allows (Chrono Trigger's 224-line, sub-320-wide screens) does not
-    // leak the stale VRAM around the picture onto the screen.
+    // Present only the columns and scanlines the display range covers, so a mode
+    // that draws a smaller picture than it allows (Chrono Trigger's 224-line,
+    // sub-320-wide screens) does not leak the stale VRAM around the picture.
     int dx = gpu.disp_x;
     int dy = gpu.disp_y;
     int dw = psx_gpu_active_width();
@@ -354,8 +360,7 @@ publish_frame(AppContext *app)
     int blank = gpu.disp_blank;
     int bpp24 = gpu.disp_24bpp;
 
-    // Clamp the region to the canvas so the compact copy below never reads past
-    // the end of VRAM.
+    // Clamp to the canvas so the compact copy never reads past the end of VRAM.
     if (dx < 0) dx = 0;
     if (dy < 0) dy = 0;
     if (dx > VRAM_WIDTH) dx = VRAM_WIDTH;
@@ -365,27 +370,68 @@ publish_frame(AppContext *app)
     if (dw < 0) dw = 0;
     if (dh < 0) dh = 0;
 
-    // Normal 15-bit gameplay needs only the display rectangle, so copy just that
-    // (~150 KB) instead of the whole 1 MB VRAM, keeping the difference off the
-    // emulation thread's real-time budget that the audio ring depends on. The
-    // full snapshot is still published for the debug view (F1), for 24-bit
-    // display (whose unpack reads a wider, packed span), and when blank, where
-    // the compact region would not be enough. The transpose to row-major is
-    // deferred to present_frame on the vsync-limited main thread either way.
-    int full = SDL_GetAtomicInt(&g_full_vram) || bpp24 || blank || dw == 0 || dh == 0;
+    *dx_o = dx;
+    *dy_o = dy;
+    *dw_o = dw;
+    *dh_o = dh;
+    *blank_o = blank;
+    *bpp24_o = bpp24;
+    // Normal 15-bit gameplay needs only the display rectangle. The full snapshot
+    // is still published for the debug view (F1), for 24-bit display (whose
+    // unpack reads a wider, packed span), and when blank, where the compact
+    // region would not be enough.
+    *full_o = SDL_GetAtomicInt(&g_full_vram) || bpp24 || blank || dw == 0 || dh == 0;
+}
 
+// Copy the current VRAM into dst in the layout frame_display_region selected: the
+// whole column-major snapshot when full, else the compact dw x dh region (~150 KB
+// for a normal display instead of the whole 1 MB). vram.canvas is column-major,
+// so each display column is dh contiguous words.
+static void
+publish_vram_region(uint16_t *dst, int dx, int dy, int dw, int dh, int full)
+{
     if (full) {
-        memcpy(g_frame_buf[app->produce_idx], vram.canvas,
+        memcpy(dst, vram.canvas,
                (size_t)VRAM_WIDTH * VRAM_HEIGHT * sizeof(uint16_t));
     } else {
-        // vram.canvas is column-major, so each display column is dh contiguous
-        // words: copy the region as dw such segments.
-        uint16_t *dst = g_frame_buf[app->produce_idx];
         for (int x = 0; x < dw; x++) {
             memcpy(&dst[(size_t)x * dh], &vram.canvas[dx + x][dy],
                    (size_t)dh * sizeof(uint16_t));
         }
     }
+}
+
+// Transpose a published column-major snapshot to row-major. The full form covers
+// the whole VRAM (snap[x*H+y] -> dst[y*W+x]); the region form covers a compact
+// dw x dh region (snap[x*dh+y] -> dst[y*dw+x]).
+static void
+transpose_full_rowmajor(uint16_t *dst, const uint16_t *snap)
+{
+    for (int y = 0; y < VRAM_HEIGHT; y++) {
+        uint16_t *row = &dst[(size_t)y * VRAM_WIDTH];
+        for (int x = 0; x < VRAM_WIDTH; x++) {
+            row[x] = snap[(size_t)x * VRAM_HEIGHT + y];
+        }
+    }
+}
+
+static void
+transpose_region_rowmajor(uint16_t *dst, const uint16_t *snap, int dw, int dh)
+{
+    for (int y = 0; y < dh; y++) {
+        uint16_t *row = &dst[(size_t)y * dw];
+        for (int x = 0; x < dw; x++) {
+            row[x] = snap[(size_t)x * dh + y];
+        }
+    }
+}
+
+static void
+publish_frame(AppContext *app)
+{
+    int dx, dy, dw, dh, blank, bpp24, full;
+    frame_display_region(&dx, &dy, &dw, &dh, &blank, &bpp24, &full);
+    publish_vram_region(g_frame_buf[app->produce_idx], dx, dy, dw, dh, full);
 
     g_frame_meta[app->produce_idx].dx = dx;
     g_frame_meta[app->produce_idx].dy = dy;
@@ -430,12 +476,7 @@ present_frame(AppContext *app)
             // and upload it to the top-left of the texture, then render it. This
             // is ~0.15 ms instead of the ~1.24 ms a whole-VRAM transpose costs.
             static uint16_t region[VRAM_HEIGHT * VRAM_WIDTH];
-            for (int y = 0; y < dh; y++) {
-                uint16_t *row = &region[(size_t)y * dw];
-                for (int x = 0; x < dw; x++) {
-                    row[x] = snap[(size_t)x * dh + y];
-                }
-            }
+            transpose_region_rowmajor(region, snap, dw, dh);
 
             void *pixels;
             int pitch;
@@ -461,12 +502,7 @@ present_frame(AppContext *app)
         // is a whole-VRAM column-major snapshot (snap[x*H + y]). Transpose all of
         // it to row-major, which the display paths below read.
         static uint16_t rowmajor[VRAM_HEIGHT * VRAM_WIDTH];
-        for (int y = 0; y < VRAM_HEIGHT; y++) {
-            uint16_t *row = &rowmajor[(size_t)y * VRAM_WIDTH];
-            for (int x = 0; x < VRAM_WIDTH; x++) {
-                row[x] = snap[(size_t)x * VRAM_HEIGHT + y];
-            }
-        }
+        transpose_full_rowmajor(rowmajor, snap);
 
         void *pixels;
         int pitch;
@@ -1293,9 +1329,23 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     int service_active = (g_sideload_exe != NULL) || (g_games_dir != NULL);
     int kernel_up = 0, sideloaded = 0;
 
+    // ms[] is the per-frame emulation-thread budget (step plus the publish copy
+    // the windowed emu thread does at end of frame). tr[] is the row-major
+    // transpose the windowed main thread does to present; it is reported on its
+    // own, not folded into the budget, because it runs on a different thread with
+    // its own parallel budget and does not compete with audio. bench_pub and
+    // bench_row are the scratch buffers the publish and transpose write into, so
+    // the benchmark does the identical work the windowed build does.
     double *ms = malloc((size_t)measure_frames * sizeof *ms);
-    if (!ms) {
+    double *tr = malloc((size_t)measure_frames * sizeof *tr);
+    uint16_t *bench_pub = malloc((size_t)VRAM_WIDTH * VRAM_HEIGHT * sizeof(uint16_t));
+    uint16_t *bench_row = malloc((size_t)VRAM_WIDTH * VRAM_HEIGHT * sizeof(uint16_t));
+    if (!ms || !tr || !bench_pub || !bench_row) {
         fprintf(stderr, "bench: out of memory\n");
+        free(ms);
+        free(tr);
+        free(bench_pub);
+        free(bench_row);
         return 1;
     }
 
@@ -1326,12 +1376,37 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
         uint32_t f = psx_frame_count();
         if (f != last_frame) {
             uint64_t now = SDL_GetPerformanceCounter();
-            double dt = (double)(now - t_prev) / freq * 1000.0;
+            double step_ms = (double)(now - t_prev) / freq * 1000.0;
             uint32_t span = f - last_frame;
-            for (uint32_t j = 0; j < span && recorded < measure_frames; j++) {
-                ms[recorded++] = dt / (double)span;
+
+            // Do the same end-of-frame work the windowed build does, on the live
+            // VRAM: the publish copy (part of the emu-thread budget) and the
+            // present transpose (main-thread, measured apart). Using the shared
+            // helpers keeps the copied region size identical to the real build.
+            int dx, dy, dw, dh, blank, bpp24, full;
+            frame_display_region(&dx, &dy, &dw, &dh, &blank, &bpp24, &full);
+
+            uint64_t p0 = SDL_GetPerformanceCounter();
+            publish_vram_region(bench_pub, dx, dy, dw, dh, full);
+            uint64_t p1 = SDL_GetPerformanceCounter();
+            if (full) {
+                transpose_full_rowmajor(bench_row, bench_pub);
+            } else {
+                transpose_region_rowmajor(bench_row, bench_pub, dw, dh);
             }
-            t_prev = now;
+            uint64_t p2 = SDL_GetPerformanceCounter();
+
+            double pub_ms = (double)(p1 - p0) / freq * 1000.0;
+            double tr_ms = (double)(p2 - p1) / freq * 1000.0;
+
+            for (uint32_t j = 0; j < span && recorded < measure_frames; j++) {
+                ms[recorded] = (step_ms + pub_ms) / (double)span;
+                tr[recorded] = tr_ms / (double)span;
+                recorded++;
+            }
+            // Reset after the publish/transpose so their time is not charged to
+            // the next frame's step measurement.
+            t_prev = SDL_GetPerformanceCounter();
             last_frame = f;
         }
     }
@@ -1340,6 +1415,9 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
         fprintf(stderr, "bench: no frames emulated (did the CPU halt during "
                 "warmup?)\n");
         free(ms);
+        free(tr);
+        free(bench_pub);
+        free(bench_row);
         return 1;
     }
 
@@ -1357,6 +1435,9 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     if (!sorted) {
         fprintf(stderr, "bench: out of memory\n");
         free(ms);
+        free(tr);
+        free(bench_pub);
+        free(bench_row);
         return 1;
     }
     memcpy(sorted, ms, (size_t)recorded * sizeof *sorted);
@@ -1413,6 +1494,21 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     double want_frames = total_ms / budget;
     double dropped = want_frames > recorded ? want_frames - recorded : 0.0;
 
+    // Present-overhead (transpose) statistics. Reuse the sorted scratch, since the
+    // core percentiles above are already extracted into scalars.
+    double tr_sum = 0.0, tr_worst = 0.0;
+    for (uint32_t i = 0; i < recorded; i++) {
+        tr_sum += tr[i];
+        if (tr[i] > tr_worst) {
+            tr_worst = tr[i];
+        }
+    }
+    double tr_mean = tr_sum / recorded;
+    memcpy(sorted, tr, (size_t)recorded * sizeof *sorted);
+    qsort(sorted, recorded, sizeof *sorted, bench_cmp_double);
+    double tr_median = sorted[recorded / 2];
+    double tr_p99 = sorted[(uint32_t)((double)(recorded - 1) * 0.99)];
+
     printf("\n==== JonBoy benchmark ====\n");
     printf("workload: %s%s%s\n",
            g_bios_path ? g_bios_path : "(no bios)",
@@ -1426,17 +1522,26 @@ run_bench(uint32_t warmup_frames, uint32_t measure_frames)
     printf("  max     %7.2f ms\n", worst);
     printf("  over budget: %u / %u frames (%.1f%%)\n",
            over, recorded, 100.0 * over / recorded);
+    printf("  (includes the end-of-frame VRAM publish copy)\n");
     printf("\naudio model (%.0f ms SPU ring @ %d Hz):\n", ring_cap, AUDIO_RATE);
     printf("  underrun events: %u   starved frames: %u   total gap: %.1f ms\n",
            underrun_events, starved, gap_ms);
     printf("\nvideo model (60 Hz present):\n");
     printf("  sustained %.1f fps   dropped %.0f frames over %.2f s wall\n",
            sustained_fps, dropped, total_ms / 1000.0);
-    printf("\nnote: the core only (CPU+GPU raster+SPU+DMA+CD); the windowed\n"
-           "      build's publish copy and present transpose are extra.\n");
+    printf("\npresent overhead (main thread, not in the budget above):\n");
+    printf("  transpose: mean %.2f ms   median %.2f ms   p99 %.2f ms   max %.2f ms\n",
+           tr_mean, tr_median, tr_p99, tr_worst);
+    printf("\nnote: budget = core (CPU+GPU raster+SPU+DMA+CD) plus the emu-thread\n"
+           "      publish copy. The transpose runs on the vsync-limited main\n"
+           "      thread in parallel, so it is shown apart. The SDL texture upload\n"
+           "      and present themselves need a window and are not measured here.\n");
 
     free(sorted);
     free(ms);
+    free(tr);
+    free(bench_pub);
+    free(bench_row);
     return 0;
 }
 

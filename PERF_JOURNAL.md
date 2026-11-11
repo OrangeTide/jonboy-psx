@@ -31,9 +31,13 @@ Read the numbers this way:
   refilling on the fast ones. It survives, but there is no headroom.
 - The audio and video lines are modeled from the per-frame series (an SPU ring
   drained at 44.1 kHz, and a 60 Hz presenter), not captured from a device.
-- The benchmark measures the core only. The windowed build's VRAM publish copy
-  and present-time transpose are separate main-thread work and are not counted
-  here. Measure those by their effect on the live build.
+- The per-frame budget includes the end-of-frame VRAM publish copy, which the
+  windowed emulation thread pays. It does the same copy on the live VRAM through
+  the shared helper, so the region size matches the real build.
+- The present-time transpose is reported on its own line, not in the budget. It
+  runs on the vsync-limited main thread in parallel with the next frame's core
+  work, so it does not compete with audio. The SDL texture upload and present
+  themselves need a window and are not measured here.
 
 ## Canonical workloads
 
@@ -97,3 +101,30 @@ Correctness: the compact path is pixel-identical to the full path for the
 display rectangle (both resolve to the same column-major source index). Verified
 in the running window: the BIOS boot logo (15-bit, compact path) and the Chrono
 Trigger intro (full path) both render correctly, no garbage, offset, or tint.
+
+### 2026-11-11, --bench now measures the publish copy and transpose
+
+`--bench` previously measured the core only and did not touch the windowed
+publish or present path, so changes there (optimizations 1 and 2) were invisible
+to it. It now does the same end-of-frame work the windowed build does, through
+the shared helpers, so the region sizes match. The publish copy is folded into
+the per-frame budget (the emu thread pays it); the transpose is reported on its
+own line (main thread, parallel, not in the budget, so the audio model stays
+honest).
+
+The budget line now including the publish copy shifts the recorded core figures
+by well under the run-to-run jitter (the copy is ~0.02 ms for a 15-bit region,
+~0.08 ms for a full snapshot), so earlier entries remain comparable.
+
+New readings on this host, showing the transpose split by display path:
+
+| workload   | budget mean | over budget | transpose mean | path            |
+|------------|-------------|-------------|----------------|-----------------|
+| W1 bios-logo | 13.86 ms  | 40.0%       | 0.36 ms        | 15-bit region   |
+| W2 ct-intro  | 10.34 ms  |  0.3%       | 1.24 ms        | 24-bit full     |
+
+The W2 transpose of 1.24 ms matches the full-VRAM microbench exactly, confirming
+the Chrono Trigger intro is a 24-bit FMV on the full path, while a 15-bit screen
+transposes only its region. The transpose cost is real but lands on the main
+thread, which has the whole 16.67 ms in parallel, so it is headroom there rather
+than pressure on the audio budget.
