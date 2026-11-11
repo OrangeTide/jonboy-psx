@@ -490,7 +490,7 @@ step_cpu(void)
         int take = is_ge ? (value >= 0) : (value < 0);
 
         if (take) {
-            do_branch(cpu.PC + (imm_se << 2));
+            do_branch(cpu.PC + ((uint32_t)imm_se << 2));
         }
     }
     break;
@@ -506,28 +506,28 @@ step_cpu(void)
 
     case 0x04: // BEQ
         if (cpu.regs[rs] == cpu.regs[rt]) {
-            do_branch(cpu.PC + (imm_se << 2));
+            do_branch(cpu.PC + ((uint32_t)imm_se << 2));
         }
 
         break;
 
     case 0x05: // BNE
         if (cpu.regs[rs] != cpu.regs[rt]) {
-            do_branch(cpu.PC + (imm_se << 2));
+            do_branch(cpu.PC + ((uint32_t)imm_se << 2));
         }
 
         break;
 
     case 0x06: // BLEZ
         if ((int32_t)cpu.regs[rs] <= 0) {
-            do_branch(cpu.PC + (imm_se << 2));
+            do_branch(cpu.PC + ((uint32_t)imm_se << 2));
         }
 
         break;
 
     case 0x07: // BGTZ
         if ((int32_t)cpu.regs[rs] > 0) {
-            do_branch(cpu.PC + (imm_se << 2));
+            do_branch(cpu.PC + ((uint32_t)imm_se << 2));
         }
 
         break;
