@@ -924,3 +924,9 @@ spu_output_pull(int16_t *dst, int max_frames)
     atomic_store_explicit(&spu_ring_r, r, memory_order_release);
     return n;
 }
+
+int
+spu_output_capacity(void)
+{
+    return SPU_RING_FRAMES;
+}

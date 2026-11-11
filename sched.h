@@ -22,4 +22,8 @@ void psx_hardware_resched(void);
 // Reset the scheduler and the devices it drives.
 void psx_hardware_reset(void);
 
+// Video frames (VBLANKs) generated since reset. The benchmark samples this to
+// bound a measured window and to attribute wall time to each emulated frame.
+uint32_t psx_frame_count(void);
+
 #endif

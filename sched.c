@@ -161,3 +161,9 @@ psx_hardware_reset(void)
     psx_pad_reset();
     mdec_reset();
 }
+
+uint32_t
+psx_frame_count(void)
+{
+    return frame_count;
+}

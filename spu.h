@@ -31,6 +31,10 @@ void spu_cd_audio(const int16_t *frames, int nframes);
 // hands the frames to the sound device.
 int spu_output_pull(int16_t *dst, int max_frames);
 
+// Capacity of the SPU output ring in stereo frames. The benchmark's audio model
+// uses it to size the buffer that absorbs per-frame emulation-time spikes.
+int spu_output_capacity(void);
+
 // Cycles until the next output sample, but only while the sound-RAM IRQ is
 // armed (it can fire mid-mix). Returns UINT32_MAX otherwise, so the scheduler
 // batches freely when no SPU interrupt can be raised.

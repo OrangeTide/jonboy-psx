@@ -1149,6 +1149,219 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
     return 0;
 }
 
+// qsort comparator for the per-frame time series (ascending).
+static int
+bench_cmp_double(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+// Benchmark mode: measure the wall time the emulation core spends per emulated
+// video frame on a real workload. This is the number the real-time budget lives
+// or dies by. A PS1 frame is 1/60 s = 16.67 ms, so when the mean (or a p99 spike)
+// approaches that, there is no slack left for the windowed build's present and
+// audio underruns. The core runs unpaced and single-threaded here, so the exact
+// same instructions execute every run; the measured wall times still vary a
+// little with host scheduling, so mean and median are the stable figures to
+// compare across optimizations and the p99/max tail is scheduling-sensitive. The
+// audio and video drop counts are derived from the per-frame series with two
+// small, explicit models, so they need no real device.
+//
+// What is measured is the emulation thread's own work: CPU interpretation, GPU
+// rasterization, SPU mixing, DMA, and CD. The windowed build's VRAM publish copy
+// and the present-time transpose are separate main-thread work and are not here.
+static int
+run_bench(uint32_t warmup_frames, uint32_t measure_frames)
+{
+    // Devices: the same setup as run_boot, so --bios/--cd/--script/--memcard all
+    // select the workload.
+    if (mem_load_bios(g_bios_path) == 0) {
+        printf("BIOS loaded.\n");
+    } else {
+        printf("No BIOS loaded, continuing with blank ROM.\n");
+    }
+
+    if (g_psio_firmware) {
+        load_psio_firmware(g_psio_firmware);
+    }
+    if (g_psio_sd) {
+        load_virtual_sd_card(g_psio_sd);
+    }
+    if (g_psio_boot) {
+        inject_boot_stub(bios_rom);
+        printf("PSIO boot stub injected.\n");
+    }
+    if (g_games_dir) {
+        loader_set_games_dir(g_games_dir);
+    }
+    if (g_cd_path) {
+        if (cdrom_mount(g_cd_path) == 0) {
+            printf("Mounted disc %s\n", g_cd_path);
+        } else {
+            fprintf(stderr, "cd: failed to mount %s\n", g_cd_path);
+        }
+    }
+    if (g_memcard_path && mc_mount_slot(0, g_memcard_path) == 0) {
+        printf("Memory card (slot 1) %s\n", g_memcard_path);
+    }
+    if (g_memcard2_path && mc_mount_slot(1, g_memcard2_path) == 0) {
+        printf("Memory card (slot 2) %s\n", g_memcard2_path);
+    }
+
+    cpu_reset(0xBFC00000);
+    cpu.halt_on_break = g_sideload_exe ? 0 : 1;
+
+    int service_active = (g_sideload_exe != NULL) || (g_games_dir != NULL);
+    int kernel_up = 0, sideloaded = 0;
+
+    double *ms = malloc((size_t)measure_frames * sizeof *ms);
+    if (!ms) {
+        fprintf(stderr, "bench: out of memory\n");
+        return 1;
+    }
+
+    double freq = (double)SDL_GetPerformanceFrequency();
+
+    printf("Benchmark: warming up %u frames, then measuring %u...\n",
+           warmup_frames, measure_frames);
+
+    // Warmup: run (unmeasured) past the BIOS boot and into the workload proper.
+    while (!cpu.halted && psx_frame_count() < warmup_frames) {
+        if (service_active) {
+            service_loader_boot(&kernel_up, &sideloaded);
+        }
+        step_cpu();
+    }
+
+    // Measure: record the wall time between VBLANKs. A frame counter that jumps
+    // by more than one (never, with the per-step tick, but defensively) splits
+    // its wall time evenly across the frames it covers.
+    uint32_t recorded = 0;
+    uint32_t last_frame = psx_frame_count();
+    uint64_t t_prev = SDL_GetPerformanceCounter();
+    while (!cpu.halted && recorded < measure_frames) {
+        if (service_active) {
+            service_loader_boot(&kernel_up, &sideloaded);
+        }
+        step_cpu();
+        uint32_t f = psx_frame_count();
+        if (f != last_frame) {
+            uint64_t now = SDL_GetPerformanceCounter();
+            double dt = (double)(now - t_prev) / freq * 1000.0;
+            uint32_t span = f - last_frame;
+            for (uint32_t j = 0; j < span && recorded < measure_frames; j++) {
+                ms[recorded++] = dt / (double)span;
+            }
+            t_prev = now;
+            last_frame = f;
+        }
+    }
+
+    if (recorded == 0) {
+        fprintf(stderr, "bench: no frames emulated (did the CPU halt during "
+                "warmup?)\n");
+        free(ms);
+        return 1;
+    }
+
+    // CPU-per-frame statistics.
+    double sum = 0.0, worst = 0.0;
+    for (uint32_t i = 0; i < recorded; i++) {
+        sum += ms[i];
+        if (ms[i] > worst) {
+            worst = ms[i];
+        }
+    }
+    double mean = sum / recorded;
+
+    double *sorted = malloc((size_t)recorded * sizeof *sorted);
+    if (!sorted) {
+        fprintf(stderr, "bench: out of memory\n");
+        free(ms);
+        return 1;
+    }
+    memcpy(sorted, ms, (size_t)recorded * sizeof *sorted);
+    qsort(sorted, recorded, sizeof *sorted, bench_cmp_double);
+    double median = sorted[recorded / 2];
+    double p99 = sorted[(uint32_t)((double)(recorded - 1) * 0.99)];
+
+    const double budget = 1000.0 / TARGET_FPS; // 16.67 ms real-time per frame
+
+    uint32_t over = 0;
+    for (uint32_t i = 0; i < recorded; i++) {
+        if (ms[i] > budget) {
+            over++;
+        }
+    }
+
+    double total_ms = sum;
+    double sustained_fps = (double)recorded / (total_ms / 1000.0);
+    double realtime = (recorded * budget) / total_ms;
+
+    // Audio model: a ring that holds spu_output_capacity() frames of 44.1 kHz
+    // audio absorbs per-frame spikes. Each emulated frame adds one frame's worth
+    // (budget ms) of audio but takes ms[i] of wall time to make, during which the
+    // device drains ms[i] of audio. Net change is (budget - ms[i]). Start full
+    // (the best case for an isolated window) and count a starvation each time it
+    // empties.
+    double ring_cap = 1000.0 * spu_output_capacity() / AUDIO_RATE;
+    double ring = ring_cap;
+    uint32_t starved = 0, underrun_events = 0;
+    double gap_ms = 0.0;
+    int was_empty = 0;
+    for (uint32_t i = 0; i < recorded; i++) {
+        ring += budget - ms[i];
+        if (ring <= 0.0) {
+            gap_ms += -ring;
+            ring = 0.0;
+            starved++;
+            if (!was_empty) {
+                underrun_events++;
+            }
+            was_empty = 1;
+        } else {
+            was_empty = 0;
+            if (ring > ring_cap) {
+                ring = ring_cap;
+            }
+        }
+    }
+
+    // Video model: a 60 Hz presenter wants one frame per budget ms of wall time.
+    // Over the wall time this window took, real-time would show total_ms/budget
+    // frames; the core produced `recorded`. The shortfall is dropped (repeated)
+    // frames the player sees as stutter.
+    double want_frames = total_ms / budget;
+    double dropped = want_frames > recorded ? want_frames - recorded : 0.0;
+
+    printf("\n==== JonBoy benchmark ====\n");
+    printf("workload: %s%s%s\n",
+           g_bios_path ? g_bios_path : "(no bios)",
+           g_cd_path ? " + " : "", g_cd_path ? g_cd_path : "");
+    printf("measured %u frames (after %u warmup)\n", recorded, warmup_frames);
+    printf("\nemulation-thread wall time per frame (budget %.2f ms):\n", budget);
+    printf("  mean    %7.2f ms   (%.2fx real-time, %.1f fps sustained)\n",
+           mean, realtime, sustained_fps);
+    printf("  median  %7.2f ms\n", median);
+    printf("  p99     %7.2f ms\n", p99);
+    printf("  max     %7.2f ms\n", worst);
+    printf("  over budget: %u / %u frames (%.1f%%)\n",
+           over, recorded, 100.0 * over / recorded);
+    printf("\naudio model (%.0f ms SPU ring @ %d Hz):\n", ring_cap, AUDIO_RATE);
+    printf("  underrun events: %u   starved frames: %u   total gap: %.1f ms\n",
+           underrun_events, starved, gap_ms);
+    printf("\nvideo model (60 Hz present):\n");
+    printf("  sustained %.1f fps   dropped %.0f frames over %.2f s wall\n",
+           sustained_fps, dropped, total_ms / 1000.0);
+    printf("\nnote: the core only (CPU+GPU raster+SPU+DMA+CD); the windowed\n"
+           "      build's publish copy and present transpose are extra.\n");
+
+    free(sorted);
+    free(ms);
+    return 0;
+}
+
 // Per-step service for the gdb run loop: keeps the loader and sideload boot live
 // under gdb, the same way the other run loops call service_loader_boot.
 static int gdb_kernel_up;
@@ -1222,6 +1435,7 @@ print_usage(const char *prog)
             "  %s --headless <file> [opts]     run a flat binary with no window\n"
             "  %s --exe <file.exe> [opts]      run a PS-EXE headless (conformance)\n"
             "  %s --boot [opts]                boot the BIOS headless\n"
+            "  %s --bench [opts]               measure core wall time per frame\n"
             "  %s --gdb [port]                 boot under a gdb remote server\n"
             "                                  (default port 1234, loopback only)\n"
             "Boot options (also apply to the windowed emulator):\n"
@@ -1235,12 +1449,15 @@ print_usage(const char *prog)
             "  --memcard <file>    slot 1 memory card image (raw 128 KB; created if absent)\n"
             "  --memcard2 <file>   slot 2 memory card image (raw 128 KB; created if absent)\n"
             "  --script <file>     run a timed system-event script (pad, disc)\n"
+            "Benchmark options (with --bench; uses the boot options above):\n"
+            "  --bench-warmup <n>  frames to run before measuring (default 300)\n"
+            "  --bench-frames <n>  frames to measure (default 600, ~10 s console)\n"
             "Headless options:\n"
             "  --load-addr <hex>   physical load address (default 0)\n"
             "  --pc <hex>          entry PC (default = load address)\n"
             "  --steps <n>         max instructions to run\n"
             "  --vram-out <file>   write the 320x240 VRAM region as a PPM image\n",
-            prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog);
 }
 
 int
@@ -1250,6 +1467,9 @@ main(int argc, char *argv[])
     const char *exe_file = NULL;
     const char *vram_out = NULL;
     int boot_mode = 0;
+    int bench_mode = 0;
+    uint32_t bench_warmup = 300;   // frames to run before measuring (past boot)
+    uint32_t bench_frames = 600;   // frames to measure (~10 s console time)
     int gdb_mode = 0;
     int gdb_port = 1234;
     uint32_t load_addr = 0;
@@ -1263,6 +1483,12 @@ main(int argc, char *argv[])
             headless_file = argv[++i];
         } else if (strcmp(argv[i], "--exe") == 0 && i + 1 < argc) {
             exe_file = argv[++i];
+        } else if (strcmp(argv[i], "--bench") == 0) {
+            bench_mode = 1;
+        } else if (strcmp(argv[i], "--bench-warmup") == 0 && i + 1 < argc) {
+            bench_warmup = (uint32_t)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "--bench-frames") == 0 && i + 1 < argc) {
+            bench_frames = (uint32_t)strtoul(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--boot") == 0) {
             boot_mode = 1;
         } else if (strcmp(argv[i], "--gdb") == 0) {
@@ -1328,6 +1554,14 @@ main(int argc, char *argv[])
 
     if (gdb_mode) {
         return run_gdb(gdb_port);
+    }
+
+    if (bench_mode) {
+        if (bench_frames == 0) {
+            fprintf(stderr, "bench: --bench-frames must be at least 1\n");
+            return 1;
+        }
+        return run_bench(bench_warmup, bench_frames);
     }
 
     if (boot_mode) {
