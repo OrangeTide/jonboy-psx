@@ -285,6 +285,11 @@ typedef struct {
     SDL_AtomicInt paused;
     SDL_AtomicInt paused_ack;
     SDL_AtomicInt overlay;
+
+    // View settings the menu changes (main-thread owned).
+    int aspect_mode;   // 0 = 4:3 letterbox, 1 = stretch, 2 = integer scale
+    int scale_idx;     // index into the window-size presets
+    int fullscreen;    // 0/1
 } AppContext;
 
 // Three linear row-major BGR555 snapshots of VRAM, one per triple-buffer slot,
@@ -306,6 +311,10 @@ static struct {
 // the debug full-VRAM view is on, the producer must publish the whole snapshot,
 // not just the display region.
 static SDL_AtomicInt g_full_vram;
+
+// Live performance HUD toggle. Initialized from JONBOY_PERF at startup; the View
+// menu flips it at runtime, and the emu thread reads it each pass.
+static SDL_AtomicInt g_perf_hud;
 
 // SPU output is 44.1 kHz stereo 16-bit. The audio device pulls on demand through
 // this callback, which runs on SDL's own audio thread and drains the SPU ring.
@@ -623,7 +632,6 @@ emu_thread(void *data)
     // gives the fraction of the real-time budget the interpreter consumes. Below
     // 100% there is headroom; at 100% with fewer than 60 emulated frames the core
     // is saturated and audio underruns follow.
-    int perf_hud = getenv("JONBOY_PERF") != NULL;
     uint64_t report_last = last_time;
     double busy_acc = 0.0;
     int frames_acc = 0;
@@ -677,7 +685,7 @@ emu_thread(void *data)
             busy_acc += (double)(SDL_GetPerformanceCounter() - busy_start) / counts_per_sec;
         }
 
-        if (perf_hud) {
+        if (SDL_GetAtomicInt(&g_perf_hud)) {
             double since = (double)(last_time - report_last) / counts_per_sec;
             if (since >= 1.0) {
                 double load = busy_acc / since * 100.0;
@@ -715,16 +723,17 @@ reset_machine(void)
 }
 
 // Overlay screens.
-enum { OV_BAR, OV_PICK, OV_ABOUT };
+enum { OV_BAR, OV_PICK, OV_ABOUT, OV_RECENT };
 
 // What a file pick will do once a file is chosen.
 enum { PICK_BOOT, PICK_SWAP, PICK_CARD1, PICK_CARD2 };
 
 #define OV_MAX_ENTRIES 512
 #define OV_NAME_MAX    255
+#define OV_RECENT_MAX  8
 
 static struct {
-    int screen;                                   // OV_BAR / OV_PICK / OV_ABOUT
+    int screen;                                   // OV_BAR / OV_PICK / OV_ABOUT / OV_RECENT
     int menu;                                     // open top menu
     int item;                                     // selected item in that menu
 
@@ -733,33 +742,87 @@ static struct {
     char entries[OV_MAX_ENTRIES][OV_NAME_MAX + 1];
     int is_dir[OV_MAX_ENTRIES];
     int entry_count;
-    int sel;                                      // selected entry
+    int sel;                                      // selected entry (picker/recent)
     int scroll;                                   // first visible row
+
+    char recent[OV_RECENT_MAX][PATH_MAX];         // most-recently-booted discs
+    int recent_count;
 
     char status[96];                              // transient one-line message
 } ov;
 
+// Window-size presets for View > Scale.
+static const struct { int w, h; const char *name; } ov_scales[] = {
+    { 640, 480, "640x480" }, { 960, 720, "960x720" },
+    { 1280, 960, "1280x960" }, { 1600, 1200, "1600x1200" },
+};
+#define OV_SCALE_COUNT ((int)(sizeof ov_scales / sizeof ov_scales[0]))
+
+static const char *const ov_aspect_names[] = { "4:3", "Stretch", "Integer" };
+
 // The menu bar: top menus and their items. Kept as flat tables so navigation and
-// drawing are trivial.
-static const char *const ov_menu_titles[] = { "File", "Cards", "Help" };
-#define OV_MENU_COUNT 3
+// drawing are trivial. The View labels are built dynamically (ov_item_label).
+static const char *const ov_menu_titles[] = { "File", "Cards", "View", "Help" };
+#define OV_MENU_COUNT 4
+
+enum { MENU_FILE, MENU_CARDS, MENU_VIEW, MENU_HELP };
 
 static const char *const ov_file_items[] = {
-    "Boot Disc...", "Swap Disc...", "Close Disc", "Reset", "Exit"
+    "Boot Disc...", "Swap Disc...", "Recent", "Close Disc", "Reset", "Exit"
 };
 static const char *const ov_card_items[] = {
-    "Insert Card 1...", "Insert Card 2..."
+    "Insert Card 1...", "Eject Card 1", "Insert Card 2...", "Eject Card 2"
+};
+static const char *const ov_view_items[] = {
+    "Fullscreen", "VRAM View", "Aspect", "Scale", "Perf HUD"
 };
 static const char *const ov_help_items[] = { "About" };
 
 static const char *const *const ov_menu_items[] = {
-    ov_file_items, ov_card_items, ov_help_items
+    ov_file_items, ov_card_items, ov_view_items, ov_help_items
 };
 static const int ov_menu_item_count[] = {
     (int)(sizeof ov_file_items / sizeof ov_file_items[0]),
     (int)(sizeof ov_card_items / sizeof ov_card_items[0]),
+    (int)(sizeof ov_view_items / sizeof ov_view_items[0]),
     (int)(sizeof ov_help_items / sizeof ov_help_items[0]),
 };
+
+// Build the display label for a menu item. View items show their current value;
+// everything else is the static string.
+static void
+ov_item_label(AppContext *app, int menu, int i, char *buf, size_t n)
+{
+    if (menu == MENU_VIEW) {
+        switch (i) {
+        case 0: SDL_snprintf(buf, n, "Fullscreen   %s", app->fullscreen ? "on" : "off"); return;
+        case 1: SDL_snprintf(buf, n, "VRAM View    %s", app->full_vram_view ? "on" : "off"); return;
+        case 2: SDL_snprintf(buf, n, "Aspect       %s", ov_aspect_names[app->aspect_mode]); return;
+        case 3: SDL_snprintf(buf, n, "Scale        %s", ov_scales[app->scale_idx].name); return;
+        case 4: SDL_snprintf(buf, n, "Perf HUD     %s", SDL_GetAtomicInt(&g_perf_hud) ? "on" : "off"); return;
+        }
+    }
+    SDL_snprintf(buf, n, "%s", ov_menu_items[menu][i]);
+}
+
+// Push a disc path onto the recent list, most recent first, de-duplicated.
+static void
+ov_recent_add(const char *path)
+{
+    int at = -1;
+    for (int i = 0; i < ov.recent_count; i++) {
+        if (strcmp(ov.recent[i], path) == 0) {
+            at = i;
+            break;
+        }
+    }
+    int top = (at >= 0) ? at : (ov.recent_count < OV_RECENT_MAX
+                                ? ov.recent_count++ : OV_RECENT_MAX - 1);
+    for (int i = top; i > 0; i--) {
+        SDL_strlcpy(ov.recent[i], ov.recent[i - 1], sizeof ov.recent[i]);
+    }
+    SDL_strlcpy(ov.recent[0], path, sizeof ov.recent[0]);
+}
 
 // Pause the core and wait until the emu thread has parked at a frame boundary, so
 // the menu actions can touch core state safely. Mutes audio while open.
@@ -902,6 +965,21 @@ ov_open_picker(int pick_for)
     ov.screen = OV_PICK;
 }
 
+// Boot a disc image: swap it in, reset, record it as recent, and resume.
+static int
+ov_boot_disc(AppContext *app, const char *full)
+{
+    cdrom_eject();
+    if (cdrom_mount(full) == 0) {
+        reset_machine();
+        app->have_frame = 0;
+        ov_recent_add(full);
+        return 1; // resume into the booting disc
+    }
+    SDL_snprintf(ov.status, sizeof ov.status, "mount failed");
+    return 0;
+}
+
 // Act on the chosen file. Returns 1 if the overlay should close (resume the game).
 static int
 ov_pick_choose(AppContext *app)
@@ -923,14 +1001,7 @@ ov_pick_choose(AppContext *app)
 
     switch (ov.pick_for) {
     case PICK_BOOT:
-        cdrom_eject();
-        if (cdrom_mount(full) == 0) {
-            reset_machine();
-            app->have_frame = 0;
-            return 1; // resume into the booting disc
-        }
-        SDL_snprintf(ov.status, sizeof ov.status, "mount failed");
-        return 0;
+        return ov_boot_disc(app, full);
     case PICK_SWAP:
         cdrom_eject();
         cdrom_mount(full);
@@ -949,24 +1020,99 @@ ov_pick_choose(AppContext *app)
     return 0;
 }
 
+// Boot the selected recent disc. Returns 1 to resume.
+static int
+ov_recent_choose(AppContext *app)
+{
+    if (ov.recent_count == 0) {
+        return 0;
+    }
+    char path[PATH_MAX];
+    SDL_strlcpy(path, ov.recent[ov.sel], sizeof path);
+    return ov_boot_disc(app, path);
+}
+
+// ---- View settings ----
+
+static void
+ov_apply_aspect(AppContext *app)
+{
+    SDL_RendererLogicalPresentation mode =
+        app->aspect_mode == 1 ? SDL_LOGICAL_PRESENTATION_STRETCH
+      : app->aspect_mode == 2 ? SDL_LOGICAL_PRESENTATION_INTEGER_SCALE
+      : SDL_LOGICAL_PRESENTATION_LETTERBOX;
+    SDL_SetRenderLogicalPresentation(app->renderer, 640, 480, mode);
+    SDL_snprintf(ov.status, sizeof ov.status, "aspect: %s",
+                 ov_aspect_names[app->aspect_mode]);
+}
+
+static void
+ov_apply_scale(AppContext *app)
+{
+    if (app->fullscreen) {
+        return; // window size has no effect while fullscreen
+    }
+    SDL_SetWindowSize(app->window, ov_scales[app->scale_idx].w,
+                      ov_scales[app->scale_idx].h);
+    SDL_snprintf(ov.status, sizeof ov.status, "scale: %s",
+                 ov_scales[app->scale_idx].name);
+}
+
+static void
+ov_toggle_fullscreen(AppContext *app)
+{
+    app->fullscreen = !app->fullscreen;
+    SDL_SetWindowFullscreen(app->window, app->fullscreen);
+    SDL_snprintf(ov.status, sizeof ov.status, "fullscreen: %s",
+                 app->fullscreen ? "on" : "off");
+}
+
+static void
+ov_toggle_vram_view(AppContext *app)
+{
+    app->full_vram_view = !app->full_vram_view;
+    SDL_SetAtomicInt(&g_full_vram, app->full_vram_view);
+    SDL_snprintf(ov.status, sizeof ov.status, "VRAM view: %s",
+                 app->full_vram_view ? "on" : "off");
+}
+
+static void
+ov_toggle_perf_hud(void)
+{
+    int on = !SDL_GetAtomicInt(&g_perf_hud);
+    SDL_SetAtomicInt(&g_perf_hud, on);
+    SDL_snprintf(ov.status, sizeof ov.status, "perf HUD: %s", on ? "on" : "off");
+}
+
 // Run the highlighted menu-bar item. Returns 1 if the overlay should close.
 static int
 ov_activate(AppContext *app)
 {
-    if (ov.menu == 0) { // File
+    if (ov.menu == MENU_FILE) {
         switch (ov.item) {
         case 0: ov_open_picker(PICK_BOOT); return 0;
         case 1: ov_open_picker(PICK_SWAP); return 0;
-        case 2: cdrom_eject(); SDL_snprintf(ov.status, sizeof ov.status, "disc ejected"); return 0;
-        case 3: reset_machine(); app->have_frame = 0; return 1;
-        case 4: SDL_SetAtomicInt(&app->running, 0); return 1;
+        case 2: ov.screen = OV_RECENT; ov.sel = 0; ov.scroll = 0; return 0;
+        case 3: cdrom_eject(); SDL_snprintf(ov.status, sizeof ov.status, "disc ejected"); return 0;
+        case 4: reset_machine(); app->have_frame = 0; return 1;
+        case 5: SDL_SetAtomicInt(&app->running, 0); return 1;
         }
-    } else if (ov.menu == 1) { // Cards
+    } else if (ov.menu == MENU_CARDS) {
         switch (ov.item) {
         case 0: ov_open_picker(PICK_CARD1); return 0;
-        case 1: ov_open_picker(PICK_CARD2); return 0;
+        case 1: mc_eject_slot(0); SDL_snprintf(ov.status, sizeof ov.status, "card 1 ejected"); return 0;
+        case 2: ov_open_picker(PICK_CARD2); return 0;
+        case 3: mc_eject_slot(1); SDL_snprintf(ov.status, sizeof ov.status, "card 2 ejected"); return 0;
         }
-    } else if (ov.menu == 2) { // Help
+    } else if (ov.menu == MENU_VIEW) {
+        switch (ov.item) {
+        case 0: ov_toggle_fullscreen(app); return 0;
+        case 1: ov_toggle_vram_view(app); return 0;
+        case 2: app->aspect_mode = (app->aspect_mode + 1) % 3; ov_apply_aspect(app); return 0;
+        case 3: app->scale_idx = (app->scale_idx + 1) % OV_SCALE_COUNT; ov_apply_scale(app); return 0;
+        case 4: ov_toggle_perf_hud(); return 0;
+        }
+    } else if (ov.menu == MENU_HELP) {
         ov.screen = OV_ABOUT;
         return 0;
     }
@@ -997,6 +1143,23 @@ overlay_nav(AppContext *app, int nav)
             break;
         case NAV_OK:
             return ov_pick_choose(app);
+        case NAV_BACK:
+            ov.screen = OV_BAR;
+            break;
+        }
+        return 0;
+    }
+
+    if (ov.screen == OV_RECENT) {
+        switch (nav) {
+        case NAV_UP:
+            if (ov.sel > 0) ov.sel--;
+            break;
+        case NAV_DOWN:
+            if (ov.sel < ov.recent_count - 1) ov.sel++;
+            break;
+        case NAV_OK:
+            return ov_recent_choose(app);
         case NAV_BACK:
             ov.screen = OV_BAR;
             break;
@@ -1105,15 +1268,38 @@ overlay_draw(AppContext *app)
             mx += (int)strlen(ov_menu_titles[m]) * OV_CH + 12;
         }
         int n = ov_menu_item_count[ov.menu];
-        int w = 160, rowh = 14;
+        int w = 180, rowh = 14;
         ov_fill(r, mx - 4, 14, w, n * rowh + 4, 24, 28, 44, 240);
         for (int i = 0; i < n; i++) {
             int ry = 16 + i * rowh;
             if (i == ov.item) {
                 ov_fill(r, mx - 4, ry - 1, w, rowh, 60, 90, 160, 255);
             }
-            ov_text(r, mx, ry, 230, 230, 240, ov_menu_items[ov.menu][i]);
+            char label[64];
+            ov_item_label(app, ov.menu, i, label, sizeof label);
+            ov_text(r, mx, ry, 230, 230, 240, label);
         }
+    } else if (ov.screen == OV_RECENT) {
+        int px = 40, py = 48, pw = 560, ph = 300;
+        ov_fill(r, px, py, pw, ph, 24, 28, 44, 245);
+        ov_fill(r, px, py, pw, 16, 40, 48, 72, 255);
+        ov_text(r, px + 6, py + 4, 230, 230, 240, "Recent Discs");
+        if (ov.recent_count == 0) {
+            ov_text(r, px + 12, py + 30, 180, 180, 200, "(none yet)");
+        }
+        int rowh = 14;
+        for (int i = 0; i < ov.recent_count; i++) {
+            int ry = py + 30 + i * rowh;
+            if (i == ov.sel) {
+                ov_fill(r, px + 4, ry - 1, pw - 8, rowh, 60, 90, 160, 255);
+            }
+            // Show the basename, which is enough to recognize the title.
+            const char *base = strrchr(ov.recent[i], '/');
+            base = base ? base + 1 : ov.recent[i];
+            ov_text(r, px + 8, ry, 230, 230, 240, base);
+        }
+        ov_text(r, px + 6, py + ph - 12, 150, 150, 170,
+                "Up/Down move  Z/Enter boot  X/Esc back");
     } else if (ov.screen == OV_PICK) {
         int px = 40, py = 48, pw = 560, ph = 384;
         ov_fill(r, px, py, pw, ph, 24, 28, 44, 245);
@@ -1186,6 +1372,7 @@ jonboy_runapp(int argc, char *argv[])
 
     AppContext app = { 0 };
     SDL_SetAtomicInt(&app.running, 1);
+    SDL_SetAtomicInt(&g_perf_hud, getenv("JONBOY_PERF") != NULL);
 
     // 2. Create an SDL3 window and hardware-accelerated renderer. The PSX display
     // is 4:3 on a TV whatever its internal pixel resolution, so the window opens
@@ -1203,6 +1390,10 @@ jonboy_runapp(int argc, char *argv[])
     // logical area (a NULL destination), so SDL applies the scaling and bars.
     SDL_SetRenderLogicalPresentation(app.renderer, 640, 480,
                                      SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    // View-menu state starts matched to the window created above (4:3 letterbox at
+    // 960x720), so the menu labels read true from the first open.
+    app.aspect_mode = 0;
+    app.scale_idx = 1;
 
     // Pace presentation to the display refresh so the main thread does not spin.
     // The emulation thread keeps its own real-time pacing independently.

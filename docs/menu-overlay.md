@@ -335,6 +335,14 @@ A sensible build order, each shippable:
    and composite path end to end.
 2. File picker (native dialog first), Recent, Cards, and the View toggles. Now it
    is a usable front end and in-game disc/card manager with no new core subsystems.
+   Done. Added File > Recent (in-memory most-recently-booted discs, becomes
+   persistent in phase 3 with the config file), the View menu (Fullscreen, VRAM
+   View, Aspect 4:3/Stretch/Integer, Scale presets, live Perf HUD toggle), and
+   Cards Eject (a small mc_eject_slot in mc.c, the one core addition this phase).
+   The file picker stayed the in-window browser rather than the async native dialog,
+   since it is synchronous and controller-navigable; the native dialog can be an
+   alternative later. The Perf HUD toggle made JONBOY_PERF a live SDL_AtomicInt the
+   emu thread reads each pass instead of a one-shot getenv.
 3. Settings dialog and config persistence, including Controller Mapping (replace
    the hardcoded key switch). Now the emulator is configurable without env vars.
 4. Save-state serialization and the State menu. The largest piece, deferred last so

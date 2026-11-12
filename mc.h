@@ -23,6 +23,10 @@ int mc_mount(const char *path); // slot 0
 int mc_present_slot(int slot);
 int mc_present(void); // slot 0
 
+// Remove the card from a slot so it stops answering the SIO0 protocol. Writes
+// already persist to the backing file as they happen, so nothing is lost.
+void mc_eject_slot(int slot);
+
 // Process one SIO byte of a memory-card transaction on a slot. `pos` is the byte
 // index within the transaction (0 is the 0x81 addressing byte), `value` the byte
 // the console sent. Returns the byte the card shifts back and sets *ack to

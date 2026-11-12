@@ -137,6 +137,17 @@ mc_present_slot(int slot)
     return slot >= 0 && slot < MC_SLOTS && cards[slot].present;
 }
 
+void
+mc_eject_slot(int slot)
+{
+    if (slot < 0 || slot >= MC_SLOTS) {
+        return;
+    }
+    // Writes already persist to the backing file as they happen, so clearing the
+    // slot is enough: the card stops answering the SIO0 protocol.
+    memset(&cards[slot], 0, sizeof cards[slot]);
+}
+
 int
 mc_present(void)
 {
