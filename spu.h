@@ -25,11 +25,13 @@ uint16_t spu_transfer_read(void);
 // output, scaled by the CD volume registers. No audio backend exists yet, so
 // this currently discards; it is the seam for CD music once the SPU emits sound.
 void spu_cd_audio(const int16_t *frames, int nframes);
+void spu_cd_get_stats(uint64_t *in, uint64_t *overflow, uint64_t *underrun);
 
 // Drain up to max_frames stereo frames of SPU output into dst (interleaved
 // 16-bit L/R). Returns the number of frames written. The app calls this and
 // hands the frames to the sound device.
 int spu_output_pull(int16_t *dst, int max_frames);
+int spu_output_queued(void);
 
 // Capacity of the SPU output ring in stereo frames. The benchmark's audio model
 // uses it to size the buffer that absorbs per-frame emulation-time spikes.

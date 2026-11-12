@@ -298,3 +298,45 @@ Gates before default-on, all green: differential test, readback-fence stress
 (make gpu-readback-test), gpu_status atomicity, the condvar worker wakeup, and the
 windowed payoff. Conformance stays 29/29 and the FFT boot regression reaches the
 same PC, since the deterministic modes are untouched.
+
+### 2026-11-11, audio-paced timing cushion (FMV dropout fix)
+
+Reported symptom: audible audio dropouts during normal FMV playback, not during a
+save or load. Three measurements located the cause.
+
+1. Headless CD/XA FIFO instrumentation (temporary counters in spu.c, printed by the
+   `--boot` end dump). Over a 600M-step CT boot through the intro FMV: 837k CD/XA
+   frames fed, 0 dropped on a full FIFO, 0 drains starved on an empty FIFO. The XA
+   decode to cd_fifo to SPU-drain chain is deterministically balanced (both clocks
+   are exact: 33.8688 MHz / 768 = 44100 Hz drain, / 451584 = 75 sectors/s feed), so
+   this is not a packet or bitrate mismatch.
+2. W2 ct-intro bench inside the FMV (warmup 1200): mean 9.99 ms, p99 12.91 ms, max
+   13.22 ms, 0/600 frames over the 16.67 ms budget, 0 modeled underruns. The core is
+   not too slow.
+3. Windowed build with JONBOY_PERF=1 through boot and FMV: 55-77% of budget (ample
+   headroom), yet sporadic callback underruns, a cluster at startup then 1-2/s.
+
+So the dropouts are real-time ring underruns from host scheduling jitter, not a slow
+core or a feed mismatch. The emulation thread paced to exactly real time with the
+wall-clock accumulator and built no audio buffer: the SPU output ring (186 ms
+capacity) hovered near empty, and at startup the device drained immediately while the
+first frame batch waited a frame, so any brief stall starved the callback.
+
+Fix: pace the core to a target audio cushion. The audio device drains the ring at a
+fixed 44.1 kHz, so running the core ahead to keep the ring filled to
+AUDIO_CUSHION_FRAMES (~83 ms, five frames, well under the 186 ms ring) yields
+real-time playback with a jitter buffer that a brief stall drains instead of the
+device. The wall-clock accumulator stays as the real-time floor and the no-audio
+fallback, so the core cannot freeze if the device stalls and cannot run fast long
+term; the run-ahead self-limits at the cushion and rebuilds it after a deep stall.
+
+| scene (windowed, JONBOY_PERF) | emu-thread budget | audio underruns/s        |
+|-------------------------------|-------------------|--------------------------|
+| CT boot + FMV, before         | 55-77%            | 4,1,1 at startup, 1-2/s  |
+| CT boot + FMV, after          | 55-77%            | 0 across 96 s            |
+
+The cushion adds ~83 ms of audio latency (tunable via AUDIO_CUSHION_FRAMES); video is
+unaffected, since the present path always shows the latest published frame. The
+deterministic run modes do not use the emu thread and are untouched: conformance
+29/29, the save-state determinism self-test passes, and the headless FIFO balance is
+unchanged.

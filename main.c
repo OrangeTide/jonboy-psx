@@ -349,6 +349,16 @@ static SDL_AtomicInt g_perf_hud;
 // main thread entirely: a blocked event pump or slow present cannot starve it.
 #define AUDIO_RATE 44100
 
+// Audio-paced timing cushion. The audio device drains the SPU ring at exactly
+// 44.1 kHz, so keeping the ring filled to a target depth makes the core run at
+// real time with a jitter buffer: brief scheduling stalls are covered by the
+// buffered audio instead of starving the device. ~83 ms (five video frames) sits
+// well under the 186 ms ring and is small enough that the added latency is
+// imperceptible. MAX_CATCHUP_FRAMES bounds how many frames one pass may run while
+// refilling the cushion, so a long stall cannot make a single pass run away.
+#define AUDIO_CUSHION_FRAMES (AUDIO_RATE / 12)
+#define MAX_CATCHUP_FRAMES 8
+
 // Audio-dropout metric: the audio device pulls a fixed number of frames each
 // callback. When the SPU ring cannot supply them all, the device gets silence
 // and the player hears a gap. Each such short callback counts one underrun; the
@@ -654,6 +664,16 @@ emu_thread(void *data)
     double time_bridge = 1.0 / TARGET_FPS;
     double counts_per_sec = (double)SDL_GetPerformanceFrequency();
 
+    // Pacing has two terms. The wall-clock accumulator is the real-time floor: it
+    // runs a frame every time_bridge of elapsed wall time, so the core always keeps
+    // real time even if the audio device is absent or stalls. On top of that, when
+    // an audio device is open, the core runs ahead to keep the SPU ring filled to
+    // AUDIO_CUSHION_FRAMES. The device drains the ring at exactly 44.1 kHz, so this
+    // run-ahead self-limits at the cushion and then the floor maintains it; the
+    // cushion is a jitter buffer that a brief stall drains instead of starving the
+    // audio callback. A deep stall rebuilds it automatically on the next passes.
+    int audio_paced = (app->audio != NULL);
+
     // Live real-time metric (JONBOY_PERF=1). busy_acc is the wall time spent
     // actually running instructions; comparing it to the wall time that elapsed
     // gives the fraction of the real-time budget the interpreter consumes. Below
@@ -688,7 +708,20 @@ emu_thread(void *data)
 
         int ran = 0;
         uint64_t busy_start = SDL_GetPerformanceCounter();
-        while (accumulator >= time_bridge && SDL_GetAtomicInt(&app->running)) {
+        while (SDL_GetAtomicInt(&app->running)) {
+            int need_realtime = accumulator >= time_bridge;
+            int need_cushion = audio_paced
+                               && spu_output_queued() < AUDIO_CUSHION_FRAMES;
+            if (!need_realtime && !need_cushion) {
+                break; // caught up to real time and the cushion is full
+            }
+            // A cushion-only burst is bounded per pass so one long stall cannot
+            // make a single pass run away; the real-time floor is bounded by the
+            // backlog cap above.
+            if (!need_realtime && ran >= MAX_CATCHUP_FRAMES) {
+                break;
+            }
+
             for (uint32_t step = 0; step < STEPS_PER_FRAME; step++) {
                 if (cpu.halted) {
                     break;
@@ -698,9 +731,11 @@ emu_thread(void *data)
                 }
                 step_cpu();
             }
-            accumulator -= time_bridge;
+            if (need_realtime) {
+                accumulator -= time_bridge;
+            }
             frames_acc++;
-            ran = 1;
+            ran++;
         }
 
         // Publish once per outer pass, showing the latest state rather than every
@@ -2379,6 +2414,14 @@ run_boot(int psio, const char *sd, const char *firmware, uint64_t max_steps,
         mdec_get_stats(&decodes, &color_mb, &mono_blk);
         printf("MDEC: %u decode commands, %u colour macroblocks, %u mono blocks\n",
                decodes, color_mb, mono_blk);
+    }
+    {
+        uint64_t cd_in, cd_over, cd_under;
+        spu_cd_get_stats(&cd_in, &cd_over, &cd_under);
+        printf("CD/XA audio: %llu frames fed, %llu dropped (FIFO full), "
+               "%llu drains starved (FIFO empty mid-stream)\n",
+               (unsigned long long)cd_in, (unsigned long long)cd_over,
+               (unsigned long long)cd_under);
     }
 
     if (vram_out) {

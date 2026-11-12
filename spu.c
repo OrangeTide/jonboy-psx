@@ -121,6 +121,12 @@ static _Atomic unsigned spu_ring_w, spu_ring_r;
 static int16_t cd_fifo[CD_FIFO_FRAMES * 2];
 static unsigned cd_fifo_w, cd_fifo_r;
 
+// Diagnostics for the CD/XA feed against the steady 44.1 kHz drain. in/overflow
+// count frames pushed/dropped by spu_cd_audio; underrun counts drains that found
+// the FIFO empty while the stream was active (first..last push window).
+static uint64_t cd_stat_in, cd_stat_overflow, cd_stat_underrun;
+static uint64_t cd_stat_mix, cd_stat_first_push = (uint64_t)-1, cd_stat_last_push;
+
 // One output sample every 768 CPU cycles gives 44.1 kHz.
 #define SPU_CYCLES_PER_SAMPLE 768
 static uint32_t spu_cycle_acc;
@@ -673,11 +679,14 @@ mix_frame(void)
     // CD-reverb bit (0x04) is set the CD audio also feeds the reverb input, so
     // it must be gathered before reverb_run.
     int cdl = 0, cdr = 0;
+    cd_stat_mix++;
     if (cd_fifo_r != cd_fifo_w) {
         unsigned i = (cd_fifo_r & (CD_FIFO_FRAMES - 1)) * 2;
         cdl = cd_fifo[i];
         cdr = cd_fifo[i + 1];
         cd_fifo_r++;
+    } else if (cd_stat_mix >= cd_stat_first_push && cd_stat_mix <= cd_stat_last_push) {
+        cd_stat_underrun++; // empty drain while the stream was active
     }
     if (load_sized(spu_regs, SPUCNT_OFFSET, 2) & 0x0004) {
         rev_in_l += cdl;
@@ -899,12 +908,32 @@ spu_cd_audio(const int16_t *frames, int nframes)
             r = ((int)frames[i * 2 + 1] * vr) >> 15;
         }
         if (cd_fifo_w - cd_fifo_r >= CD_FIFO_FRAMES) {
+            cd_stat_overflow += (uint64_t)(nframes - i);
             break; // full: drop
         }
         unsigned idx = (cd_fifo_w & (CD_FIFO_FRAMES - 1)) * 2;
         cd_fifo[idx] = clamp16(l);
         cd_fifo[idx + 1] = clamp16(r);
         cd_fifo_w++;
+        cd_stat_in++;
+        if (cd_stat_first_push == (uint64_t)-1) {
+            cd_stat_first_push = cd_stat_mix;
+        }
+        cd_stat_last_push = cd_stat_mix;
+    }
+}
+
+void
+spu_cd_get_stats(uint64_t *in, uint64_t *overflow, uint64_t *underrun)
+{
+    if (in) {
+        *in = cd_stat_in;
+    }
+    if (overflow) {
+        *overflow = cd_stat_overflow;
+    }
+    if (underrun) {
+        *underrun = cd_stat_underrun;
     }
 }
 
@@ -930,6 +959,17 @@ int
 spu_output_capacity(void)
 {
     return SPU_RING_FRAMES;
+}
+
+// Frames currently queued in the output ring (produced but not yet pulled by the
+// audio callback). The emu thread uses this to pace production to a target cushion
+// so the ring never drains to empty under scheduling jitter.
+int
+spu_output_queued(void)
+{
+    unsigned w = atomic_load_explicit(&spu_ring_w, memory_order_relaxed);
+    unsigned r = atomic_load_explicit(&spu_ring_r, memory_order_acquire);
+    return (int)(w - r);
 }
 
 // Serialize the SPU's game state. The ADSR rate tables (env_denom, env_num_inc,
