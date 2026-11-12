@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <limits.h>
 
 #define SDL_MAIN_HANDLED
 #include <SDL3/SDL.h>
@@ -274,6 +277,14 @@ typedef struct {
     int produce_idx;   // emu-thread private: the buffer it writes into
     int consume_idx;   // main-thread private: the buffer it presents from
     int have_frame;    // main-thread: a frame has been received at least once
+
+    // Native menu overlay (docs/menu-overlay.md). paused asks the emu thread to
+    // stop stepping; paused_ack confirms it has parked at a frame boundary, so the
+    // main thread can mutate core state (mount a disc, reset) without a lock. overlay
+    // is 1 while the menu is open and is read only by the main thread.
+    SDL_AtomicInt paused;
+    SDL_AtomicInt paused_ack;
+    SDL_AtomicInt overlay;
 } AppContext;
 
 // Three linear row-major BGR555 snapshots of VRAM, one per triple-buffer slot,
@@ -474,11 +485,13 @@ publish_frame(AppContext *app)
     app->produce_idx = old & FRAME_IDX_MASK;
 }
 
-// Main thread: take the latest published buffer (if any) and present it. When no
-// new frame has been published since last time, it re-presents the buffer it
-// already owns, so the display keeps showing the last frame.
+// Main thread: take the latest published buffer (if any) and render it into the
+// renderer. When no new frame has been published since last time, it re-renders the
+// buffer it already owns, so the display keeps showing the last frame. This does not
+// present: the main loop presents once, after the menu overlay (if open) is drawn on
+// top, so there is a single present point per iteration.
 static void
-present_frame(AppContext *app)
+render_game_frame(AppContext *app)
 {
     if (SDL_GetAtomicInt(&app->frame_slot) & FRAME_FRESH) {
         int old = SDL_SetAtomicInt(&app->frame_slot, app->consume_idx);
@@ -520,7 +533,6 @@ present_frame(AppContext *app)
 
             SDL_FRect src = { 0.0f, 0.0f, (float)dw, (float)dh };
             SDL_RenderTexture(app->renderer, app->vram_texture, &src, NULL);
-            SDL_RenderPresent(app->renderer);
             return;
         }
 
@@ -583,8 +595,6 @@ present_frame(AppContext *app)
             SDL_RenderTexture(app->renderer, app->vram_texture, &src, NULL);
         }
     }
-
-    SDL_RenderPresent(app->renderer);
 }
 
 // The emulation thread: run the deterministic core (CPU, GPU, SPU, DMA, CD) paced
@@ -619,6 +629,19 @@ emu_thread(void *data)
     int frames_acc = 0;
 
     while (SDL_GetAtomicInt(&app->running)) {
+        if (SDL_GetAtomicInt(&app->paused)) {
+            // Park at a frame boundary: run no instructions, publish nothing, and
+            // ack so the main thread knows core state is quiescent and safe to
+            // mutate (mount a disc, reset). Reset the clock so no backlog accrues
+            // while paused; resuming starts fresh.
+            SDL_SetAtomicInt(&app->paused_ack, 1);
+            SDL_Delay(4);
+            last_time = SDL_GetPerformanceCounter();
+            accumulator = 0.0;
+            continue;
+        }
+        SDL_SetAtomicInt(&app->paused_ack, 0);
+
         uint64_t now = SDL_GetPerformanceCounter();
         accumulator += (double)(now - last_time) / counts_per_sec;
         last_time = now;
@@ -670,6 +693,484 @@ emu_thread(void *data)
         SDL_Delay(1);
     }
     return 0;
+}
+
+// ---- Native menu overlay (docs/menu-overlay.md) --------------------------
+//
+// Phase 1: a host-side menu drawn over the paused game with SDL_Renderer and the
+// built-in debug font. It never runs on the emulated console, so showing it needs
+// no save-state: the core globals are frozen while the main thread draws. Actions
+// run only while the emu thread is parked (the paused/paused_ack handshake), so
+// they mutate core state without a lock.
+
+// Reset the console: clear RAM, reset the hardware (keeps the mounted disc and the
+// loaded BIOS ROM), and jump to the BIOS entry. The windowed startup and the loader
+// reboot run the same sequence.
+static void
+reset_machine(void)
+{
+    memset(system_ram, 0, RAM_SIZE);
+    psx_hardware_reset();
+    cpu_reset(0xBFC00000);
+}
+
+// Overlay screens.
+enum { OV_BAR, OV_PICK, OV_ABOUT };
+
+// What a file pick will do once a file is chosen.
+enum { PICK_BOOT, PICK_SWAP, PICK_CARD1, PICK_CARD2 };
+
+#define OV_MAX_ENTRIES 512
+#define OV_NAME_MAX    255
+
+static struct {
+    int screen;                                   // OV_BAR / OV_PICK / OV_ABOUT
+    int menu;                                     // open top menu
+    int item;                                     // selected item in that menu
+
+    int pick_for;                                 // PICK_* for the active picker
+    char dir[PATH_MAX];                           // current browse directory
+    char entries[OV_MAX_ENTRIES][OV_NAME_MAX + 1];
+    int is_dir[OV_MAX_ENTRIES];
+    int entry_count;
+    int sel;                                      // selected entry
+    int scroll;                                   // first visible row
+
+    char status[96];                              // transient one-line message
+} ov;
+
+// The menu bar: top menus and their items. Kept as flat tables so navigation and
+// drawing are trivial.
+static const char *const ov_menu_titles[] = { "File", "Cards", "Help" };
+#define OV_MENU_COUNT 3
+
+static const char *const ov_file_items[] = {
+    "Boot Disc...", "Swap Disc...", "Close Disc", "Reset", "Exit"
+};
+static const char *const ov_card_items[] = {
+    "Insert Card 1...", "Insert Card 2..."
+};
+static const char *const ov_help_items[] = { "About" };
+
+static const char *const *const ov_menu_items[] = {
+    ov_file_items, ov_card_items, ov_help_items
+};
+static const int ov_menu_item_count[] = {
+    (int)(sizeof ov_file_items / sizeof ov_file_items[0]),
+    (int)(sizeof ov_card_items / sizeof ov_card_items[0]),
+    (int)(sizeof ov_help_items / sizeof ov_help_items[0]),
+};
+
+// Pause the core and wait until the emu thread has parked at a frame boundary, so
+// the menu actions can touch core state safely. Mutes audio while open.
+static void
+overlay_open(AppContext *app)
+{
+    ov.screen = OV_BAR;
+    ov.status[0] = '\0';
+    SDL_SetAtomicInt(&app->overlay, 1);
+    SDL_SetAtomicInt(&app->paused, 1);
+
+    while (!SDL_GetAtomicInt(&app->paused_ack)
+           && SDL_GetAtomicInt(&app->running)) {
+        SDL_Delay(1);
+    }
+
+    if (app->audio) {
+        SDL_SetAudioStreamGain(app->audio, 0.0f);
+    }
+}
+
+static void
+overlay_close(AppContext *app)
+{
+    if (app->audio) {
+        SDL_SetAudioStreamGain(app->audio, 1.0f);
+    }
+    SDL_SetAtomicInt(&app->paused, 0);
+    SDL_SetAtomicInt(&app->overlay, 0);
+}
+
+// ---- file browser ----
+
+static int
+ov_name_is_disc(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    if (!dot) {
+        return 0;
+    }
+    return SDL_strcasecmp(dot, ".cue") == 0 || SDL_strcasecmp(dot, ".bin") == 0
+           || SDL_strcasecmp(dot, ".iso") == 0 || SDL_strcasecmp(dot, ".chd") == 0
+           || SDL_strcasecmp(dot, ".img") == 0 || SDL_strcasecmp(dot, ".exe") == 0;
+}
+
+// Swap two entries (name and is_dir together).
+static void
+ov_swap_entries(int a, int b)
+{
+    char t[OV_NAME_MAX + 1];
+    SDL_strlcpy(t, ov.entries[a], sizeof t);
+    SDL_strlcpy(ov.entries[a], ov.entries[b], sizeof ov.entries[a]);
+    SDL_strlcpy(ov.entries[b], t, sizeof ov.entries[b]);
+    int d = ov.is_dir[a];
+    ov.is_dir[a] = ov.is_dir[b];
+    ov.is_dir[b] = d;
+}
+
+// Order: directories before files, then case-insensitive by name.
+static int
+ov_entry_before(int a, int b)
+{
+    if (ov.is_dir[a] != ov.is_dir[b]) {
+        return ov.is_dir[a] > ov.is_dir[b];
+    }
+    return SDL_strcasecmp(ov.entries[a], ov.entries[b]) < 0;
+}
+
+// Scan a directory into ov.entries: ".." first (unless at root), then
+// subdirectories, then matching files, each group alphabetical.
+static void
+ov_scan_dir(const char *dir)
+{
+    SDL_strlcpy(ov.dir, dir, sizeof ov.dir);
+    ov.entry_count = 0;
+    ov.sel = 0;
+    ov.scroll = 0;
+
+    int want_disc = (ov.pick_for == PICK_BOOT || ov.pick_for == PICK_SWAP);
+
+    // ".." stays pinned at index 0; sorting starts after it.
+    int sort_start = 0;
+    if (strcmp(dir, "/") != 0) {
+        SDL_strlcpy(ov.entries[0], "..", sizeof ov.entries[0]);
+        ov.is_dir[0] = 1;
+        ov.entry_count = 1;
+        sort_start = 1;
+    }
+
+    DIR *d = opendir(dir);
+    if (!d) {
+        SDL_snprintf(ov.status, sizeof ov.status, "cannot open %s", dir);
+        return;
+    }
+
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && ov.entry_count < OV_MAX_ENTRIES) {
+        if (e->d_name[0] == '.') {
+            continue; // hidden entries and . / ..
+        }
+
+        char full[PATH_MAX + OV_NAME_MAX + 2];
+        SDL_snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(full, &st) != 0) {
+            continue;
+        }
+
+        int isdir = S_ISDIR(st.st_mode);
+        if (!isdir && want_disc && !ov_name_is_disc(e->d_name)) {
+            continue; // filter non-disc files when picking a disc
+        }
+
+        SDL_strlcpy(ov.entries[ov.entry_count], e->d_name,
+                    sizeof ov.entries[ov.entry_count]);
+        ov.is_dir[ov.entry_count] = isdir;
+        ov.entry_count++;
+    }
+    closedir(d);
+
+    // Insertion sort (entry counts are modest): directories first, then names.
+    for (int i = sort_start + 1; i < ov.entry_count; i++) {
+        for (int j = i; j > sort_start && ov_entry_before(j, j - 1); j--) {
+            ov_swap_entries(j, j - 1);
+        }
+    }
+}
+
+static void
+ov_open_picker(int pick_for)
+{
+    ov.pick_for = pick_for;
+    const char *start = g_games_dir ? g_games_dir : ".";
+    char resolved[PATH_MAX];
+    if (realpath(start, resolved)) {
+        ov_scan_dir(resolved);
+    } else {
+        ov_scan_dir(".");
+    }
+    ov.screen = OV_PICK;
+}
+
+// Act on the chosen file. Returns 1 if the overlay should close (resume the game).
+static int
+ov_pick_choose(AppContext *app)
+{
+    if (ov.entry_count == 0) {
+        return 0;
+    }
+
+    char full[PATH_MAX + OV_NAME_MAX + 2];
+    SDL_snprintf(full, sizeof full, "%s/%s", ov.dir, ov.entries[ov.sel]);
+
+    if (ov.is_dir[ov.sel]) {
+        char resolved[PATH_MAX];
+        if (realpath(full, resolved)) {
+            ov_scan_dir(resolved);
+        }
+        return 0;
+    }
+
+    switch (ov.pick_for) {
+    case PICK_BOOT:
+        cdrom_eject();
+        if (cdrom_mount(full) == 0) {
+            reset_machine();
+            app->have_frame = 0;
+            return 1; // resume into the booting disc
+        }
+        SDL_snprintf(ov.status, sizeof ov.status, "mount failed");
+        return 0;
+    case PICK_SWAP:
+        cdrom_eject();
+        cdrom_mount(full);
+        return 1; // hot swap, raises the lid INT5
+    case PICK_CARD1:
+        mc_mount_slot(0, full);
+        ov.screen = OV_BAR;
+        SDL_snprintf(ov.status, sizeof ov.status, "card 1: %s", ov.entries[ov.sel]);
+        return 0;
+    case PICK_CARD2:
+        mc_mount_slot(1, full);
+        ov.screen = OV_BAR;
+        SDL_snprintf(ov.status, sizeof ov.status, "card 2: %s", ov.entries[ov.sel]);
+        return 0;
+    }
+    return 0;
+}
+
+// Run the highlighted menu-bar item. Returns 1 if the overlay should close.
+static int
+ov_activate(AppContext *app)
+{
+    if (ov.menu == 0) { // File
+        switch (ov.item) {
+        case 0: ov_open_picker(PICK_BOOT); return 0;
+        case 1: ov_open_picker(PICK_SWAP); return 0;
+        case 2: cdrom_eject(); SDL_snprintf(ov.status, sizeof ov.status, "disc ejected"); return 0;
+        case 3: reset_machine(); app->have_frame = 0; return 1;
+        case 4: SDL_SetAtomicInt(&app->running, 0); return 1;
+        }
+    } else if (ov.menu == 1) { // Cards
+        switch (ov.item) {
+        case 0: ov_open_picker(PICK_CARD1); return 0;
+        case 1: ov_open_picker(PICK_CARD2); return 0;
+        }
+    } else if (ov.menu == 2) { // Help
+        ov.screen = OV_ABOUT;
+        return 0;
+    }
+    return 0;
+}
+
+// Neutral navigation actions, shared by the keyboard and the gamepad.
+enum { NAV_UP, NAV_DOWN, NAV_LEFT, NAV_RIGHT, NAV_OK, NAV_BACK };
+
+// Returns 1 if the overlay should close.
+static int
+overlay_nav(AppContext *app, int nav)
+{
+    if (ov.screen == OV_ABOUT) {
+        if (nav == NAV_OK || nav == NAV_BACK) {
+            ov.screen = OV_BAR;
+        }
+        return 0;
+    }
+
+    if (ov.screen == OV_PICK) {
+        switch (nav) {
+        case NAV_UP:
+            if (ov.sel > 0) ov.sel--;
+            break;
+        case NAV_DOWN:
+            if (ov.sel < ov.entry_count - 1) ov.sel++;
+            break;
+        case NAV_OK:
+            return ov_pick_choose(app);
+        case NAV_BACK:
+            ov.screen = OV_BAR;
+            break;
+        }
+        return 0;
+    }
+
+    // OV_BAR
+    switch (nav) {
+    case NAV_LEFT:
+        ov.menu = (ov.menu + OV_MENU_COUNT - 1) % OV_MENU_COUNT;
+        ov.item = 0;
+        break;
+    case NAV_RIGHT:
+        ov.menu = (ov.menu + 1) % OV_MENU_COUNT;
+        ov.item = 0;
+        break;
+    case NAV_UP:
+        ov.item = (ov.item + ov_menu_item_count[ov.menu] - 1)
+                  % ov_menu_item_count[ov.menu];
+        break;
+    case NAV_DOWN:
+        ov.item = (ov.item + 1) % ov_menu_item_count[ov.menu];
+        break;
+    case NAV_OK:
+        return ov_activate(app);
+    case NAV_BACK:
+        return 1; // close the overlay from the top level
+    }
+    return 0;
+}
+
+static int
+overlay_key(AppContext *app, SDL_Keycode key)
+{
+    switch (key) {
+    case SDLK_UP:     return overlay_nav(app, NAV_UP);
+    case SDLK_DOWN:   return overlay_nav(app, NAV_DOWN);
+    case SDLK_LEFT:   return overlay_nav(app, NAV_LEFT);
+    case SDLK_RIGHT:  return overlay_nav(app, NAV_RIGHT);
+    case SDLK_RETURN:
+    case SDLK_Z:      return overlay_nav(app, NAV_OK);
+    case SDLK_ESCAPE:
+    case SDLK_X:      return overlay_nav(app, NAV_BACK);
+    default:          return 0;
+    }
+}
+
+static int
+overlay_button(AppContext *app, Uint8 button)
+{
+    switch (button) {
+    case SDL_GAMEPAD_BUTTON_DPAD_UP:    return overlay_nav(app, NAV_UP);
+    case SDL_GAMEPAD_BUTTON_DPAD_DOWN:  return overlay_nav(app, NAV_DOWN);
+    case SDL_GAMEPAD_BUTTON_DPAD_LEFT:  return overlay_nav(app, NAV_LEFT);
+    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return overlay_nav(app, NAV_RIGHT);
+    case SDL_GAMEPAD_BUTTON_SOUTH:      return overlay_nav(app, NAV_OK);
+    case SDL_GAMEPAD_BUTTON_EAST:       return overlay_nav(app, NAV_BACK);
+    default:                            return 0;
+    }
+}
+
+// ---- drawing (640x480 logical space) ----
+
+#define OV_CH 8 // debug-font character size in pixels
+
+static void
+ov_fill(SDL_Renderer *r, int x, int y, int w, int h, Uint8 cr, Uint8 cg, Uint8 cb, Uint8 ca)
+{
+    SDL_SetRenderDrawColor(r, cr, cg, cb, ca);
+    SDL_FRect rect = { (float)x, (float)y, (float)w, (float)h };
+    SDL_RenderFillRect(r, &rect);
+}
+
+static void
+ov_text(SDL_Renderer *r, int x, int y, Uint8 cr, Uint8 cg, Uint8 cb, const char *s)
+{
+    SDL_SetRenderDrawColor(r, cr, cg, cb, 255);
+    SDL_RenderDebugText(r, (float)x, (float)y, s);
+}
+
+static void
+overlay_draw(AppContext *app)
+{
+    SDL_Renderer *r = app->renderer;
+
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    ov_fill(r, 0, 0, 640, 480, 0, 0, 0, 150); // dim the frozen frame
+
+    // Menu bar.
+    ov_fill(r, 0, 0, 640, 14, 20, 24, 40, 235);
+    int x = 8;
+    for (int m = 0; m < OV_MENU_COUNT; m++) {
+        int w = (int)strlen(ov_menu_titles[m]) * OV_CH + 12;
+        if (m == ov.menu) {
+            ov_fill(r, x - 4, 0, w, 14, 60, 90, 160, 255);
+        }
+        ov_text(r, x, 3, 230, 230, 240, ov_menu_titles[m]);
+        x += w;
+    }
+
+    if (ov.screen == OV_BAR) {
+        // Dropdown under the open menu.
+        int mx = 8;
+        for (int m = 0; m < ov.menu; m++) {
+            mx += (int)strlen(ov_menu_titles[m]) * OV_CH + 12;
+        }
+        int n = ov_menu_item_count[ov.menu];
+        int w = 160, rowh = 14;
+        ov_fill(r, mx - 4, 14, w, n * rowh + 4, 24, 28, 44, 240);
+        for (int i = 0; i < n; i++) {
+            int ry = 16 + i * rowh;
+            if (i == ov.item) {
+                ov_fill(r, mx - 4, ry - 1, w, rowh, 60, 90, 160, 255);
+            }
+            ov_text(r, mx, ry, 230, 230, 240, ov_menu_items[ov.menu][i]);
+        }
+    } else if (ov.screen == OV_PICK) {
+        int px = 40, py = 48, pw = 560, ph = 384;
+        ov_fill(r, px, py, pw, ph, 24, 28, 44, 245);
+        ov_fill(r, px, py, pw, 16, 40, 48, 72, 255);
+        const char *title = (ov.pick_for == PICK_BOOT) ? "Boot Disc"
+                          : (ov.pick_for == PICK_SWAP) ? "Swap Disc"
+                          : (ov.pick_for == PICK_CARD1) ? "Insert Card 1"
+                          : "Insert Card 2";
+        ov_text(r, px + 6, py + 4, 230, 230, 240, title);
+        ov_text(r, px + 6, py + 22, 150, 170, 210, ov.dir);
+
+        int list_y = py + 40, rowh = 14;
+        int rows = (ph - 56) / rowh;
+        if (ov.sel < ov.scroll) ov.scroll = ov.sel;
+        if (ov.sel >= ov.scroll + rows) ov.scroll = ov.sel - rows + 1;
+
+        for (int i = 0; i < rows; i++) {
+            int idx = ov.scroll + i;
+            if (idx >= ov.entry_count) break;
+            int ry = list_y + i * rowh;
+            if (idx == ov.sel) {
+                ov_fill(r, px + 4, ry - 1, pw - 8, rowh, 60, 90, 160, 255);
+            }
+            char line[OV_NAME_MAX + 4];
+            SDL_snprintf(line, sizeof line, "%s%s",
+                         ov.is_dir[idx] ? "[" : " ", ov.entries[idx]);
+            if (ov.is_dir[idx]) {
+                SDL_strlcat(line, "]", sizeof line);
+            }
+            Uint8 g = ov.is_dir[idx] ? 180 : 230;
+            ov_text(r, px + 8, ry, g, g, 240, line);
+        }
+        ov_text(r, px + 6, py + ph - 12, 150, 150, 170,
+                "Up/Down move  Z/Enter open  X/Esc back");
+    } else if (ov.screen == OV_ABOUT) {
+        int px = 140, py = 150, pw = 360, ph = 150;
+        ov_fill(r, px, py, pw, ph, 24, 28, 44, 245);
+        ov_fill(r, px, py, pw, 16, 40, 48, 72, 255);
+        ov_text(r, px + 6, py + 4, 230, 230, 240, "About JonBoy");
+        ov_text(r, px + 12, py + 30, 230, 230, 240,
+                "JonBoy");
+        ov_text(r, px + 12, py + 46, 190, 200, 220,
+                "PlayStation 1 (R3000A) emulator in C");
+        char line[96];
+        int v = SDL_GetVersion();
+        SDL_snprintf(line, sizeof line, "SDL %d.%d.%d",
+                     SDL_VERSIONNUM_MAJOR(v), SDL_VERSIONNUM_MINOR(v),
+                     SDL_VERSIONNUM_MICRO(v));
+        ov_text(r, px + 12, py + 70, 190, 200, 220, line);
+        ov_text(r, px + 12, py + ph - 14, 150, 150, 170, "Z/Enter or X/Esc to close");
+    }
+
+    // Status line along the bottom.
+    if (ov.status[0]) {
+        ov_fill(r, 0, 466, 640, 14, 20, 24, 40, 235);
+        ov_text(r, 8, 469, 200, 220, 160, ov.status);
+    }
 }
 
 int SDLCALL
@@ -852,8 +1353,13 @@ jonboy_runapp(int argc, char *argv[])
             if (event.type == SDL_EVENT_QUIT) {
                 SDL_SetAtomicInt(&app.running, 0);
             } else if (event.type == SDL_EVENT_KEY_DOWN) {
-                if (event.key.key == SDLK_ESCAPE) {
-                    SDL_SetAtomicInt(&app.running, 0);
+                if (SDL_GetAtomicInt(&app.overlay)) {
+                    // The menu consumes input; none of it reaches the pad.
+                    if (overlay_key(&app, event.key.key)) {
+                        overlay_close(&app);
+                    }
+                } else if (event.key.key == SDLK_ESCAPE) {
+                    overlay_open(&app); // Esc opens the menu (Exit quits from it)
                 } else if (event.key.key == SDLK_F1) {
                     app.full_vram_view = !app.full_vram_view;
                     // Tell the emu thread to publish the whole VRAM snapshot the
@@ -865,11 +1371,15 @@ jonboy_runapp(int argc, char *argv[])
                            pad_analog_mode() ? "on" : "off");
                 }
 
-                uint16_t bit = pad_bit_for_key(event.key.key);
-                if (bit) {
-                    kbd_buttons &= ~bit; // active low: pressed clears the bit
+                if (!SDL_GetAtomicInt(&app.overlay)) {
+                    uint16_t bit = pad_bit_for_key(event.key.key);
+                    if (bit) {
+                        kbd_buttons &= ~bit; // active low: pressed clears the bit
+                    }
                 }
             } else if (event.type == SDL_EVENT_KEY_UP) {
+                // Always release, even if the key went down before the menu opened,
+                // so no pad bit stays stuck once the game resumes.
                 uint16_t bit = pad_bit_for_key(event.key.key);
                 if (bit) {
                     kbd_buttons |= bit; // released sets the bit
@@ -889,25 +1399,34 @@ jonboy_runapp(int argc, char *argv[])
                     app.gamepad = NULL;
                     printf("Gamepad disconnected\n");
                 }
-            } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
-                       event.gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) {
-                pad_toggle_analog(); // gamepad ANALOG/home button
-                printf("Pad analog mode %s\n",
-                       pad_analog_mode() ? "on" : "off");
+            } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+                if (SDL_GetAtomicInt(&app.overlay)) {
+                    if (overlay_button(&app, event.gbutton.button)) {
+                        overlay_close(&app);
+                    }
+                } else if (event.gbutton.button == SDL_GAMEPAD_BUTTON_GUIDE) {
+                    overlay_open(&app); // the Guide/Home button opens the menu
+                }
             }
         }
 
         // Fold this frame's keyboard and gamepad state into the pad, unless a
-        // script is driving the controller (it sets the pad state at VBLANK).
-        // The emu thread reads these globals; the values are single words, so a
-        // torn read is harmless (at worst one frame of mixed input).
-        if (!script_active()) {
+        // script is driving the controller (it sets the pad state at VBLANK) or the
+        // menu overlay is open (the game is frozen and must see a neutral pad). The
+        // emu thread reads these globals; the values are single words, so a torn
+        // read is harmless (at worst one frame of mixed input).
+        if (!script_active() && !SDL_GetAtomicInt(&app.overlay)) {
             update_pad_input(app.gamepad, kbd_buttons);
         }
 
-        // Present the latest published frame. VSync paces this loop; SDL_Delay is
-        // a fallback when vsync is unavailable (a dummy video driver).
-        present_frame(&app);
+        // Render the latest published frame, draw the menu over it when open, then
+        // present once. VSync paces this loop; SDL_Delay is a fallback when vsync is
+        // unavailable (a dummy video driver).
+        render_game_frame(&app);
+        if (SDL_GetAtomicInt(&app.overlay)) {
+            overlay_draw(&app);
+        }
+        SDL_RenderPresent(app.renderer);
         SDL_Delay(1);
     }
 
