@@ -352,12 +352,22 @@ static SDL_AtomicInt g_perf_hud;
 // Audio-paced timing cushion. The audio device drains the SPU ring at exactly
 // 44.1 kHz, so keeping the ring filled to a target depth makes the core run at
 // real time with a jitter buffer: brief scheduling stalls are covered by the
-// buffered audio instead of starving the device. ~83 ms (five video frames) sits
-// well under the 186 ms ring and is small enough that the added latency is
-// imperceptible. MAX_CATCHUP_FRAMES bounds how many frames one pass may run while
+// buffered audio instead of starving the device. The depth trades latency for
+// jitter tolerance; with the emu thread raised to HIGH priority (and the audio
+// callback on the real-time scheduler) jitter is small, so a shorter cushion
+// holds. The default is chosen by whether the emu thread's priority bump was
+// granted: a small cushion when it was (measured to hold with headroom at 20 ms,
+// so 40 ms leaves 2x margin), a larger jitter buffer when the thread is left at
+// normal scheduling. JONBOY_AUDIO_CUSHION_MS overrides either, clamped to leave the
+// 186 ms ring room. MAX_CATCHUP_FRAMES bounds how many frames one pass may run while
 // refilling the cushion, so a long stall cannot make a single pass run away.
-#define AUDIO_CUSHION_FRAMES (AUDIO_RATE / 12)
+#define AUDIO_CUSHION_MS_PRIORITY 40
+#define AUDIO_CUSHION_MS_NORMAL   80
+#define AUDIO_CUSHION_MS_MAX 150
 #define MAX_CATCHUP_FRAMES 8
+
+// Target ring depth in frames, resolved at emu-thread start (see AUDIO_CUSHION_MS_*).
+static int g_audio_cushion_frames = AUDIO_RATE * AUDIO_CUSHION_MS_NORMAL / 1000;
 
 // Audio-dropout metric: the audio device pulls a fixed number of frames each
 // callback. When the SPU ring cannot supply them all, the device gets silence
@@ -653,6 +663,33 @@ emu_thread(void *data)
     int kernel_up = 0;
     int sideloaded = 0;
 
+    // Run the audio producer a notch above normal so the scheduler is less likely
+    // to leave the SPU ring unfilled under load, which lets the pacing cushion stay
+    // small. HIGH (not forced real-time) is deliberate: this is a long-running
+    // compute loop, and a forced real-time compute thread risks rtkit's runtime
+    // budget (SIGKILL) and can starve the compositor. The call fails harmlessly to
+    // normal scheduling where the priority is not permitted.
+    bool elevated = SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+
+    // Resolve the audio cushion depth. With the priority bump granted, jitter is
+    // small and a short cushion holds; without it, use a larger buffer.
+    // JONBOY_AUDIO_CUSHION_MS overrides either, clamped to a sane range (0 disables
+    // the run-ahead and leaves pure real-time pacing, the old near-empty-ring case).
+    {
+        int ms = elevated ? AUDIO_CUSHION_MS_PRIORITY : AUDIO_CUSHION_MS_NORMAL;
+        const char *cm = SDL_getenv("JONBOY_AUDIO_CUSHION_MS");
+        if (cm) {
+            ms = SDL_atoi(cm);
+        }
+        if (ms < 0) {
+            ms = 0;
+        }
+        if (ms > AUDIO_CUSHION_MS_MAX) {
+            ms = AUDIO_CUSHION_MS_MAX;
+        }
+        g_audio_cushion_frames = AUDIO_RATE * ms / 1000;
+    }
+
     // The loader/sideload service only ever acts when a sideload EXE or a loader
     // games directory is configured. For a plain BIOS or disc boot neither is,
     // so skip the per-step call entirely and pay only a predicted branch. This
@@ -673,6 +710,7 @@ emu_thread(void *data)
     // cushion is a jitter buffer that a brief stall drains instead of starving the
     // audio callback. A deep stall rebuilds it automatically on the next passes.
     int audio_paced = (app->audio != NULL);
+    int audio_started = !audio_paced; // resume the device once the cushion is first met
 
     // Live real-time metric (JONBOY_PERF=1). busy_acc is the wall time spent
     // actually running instructions; comparing it to the wall time that elapsed
@@ -711,7 +749,7 @@ emu_thread(void *data)
         while (SDL_GetAtomicInt(&app->running)) {
             int need_realtime = accumulator >= time_bridge;
             int need_cushion = audio_paced
-                               && spu_output_queued() < AUDIO_CUSHION_FRAMES;
+                               && spu_output_queued() < g_audio_cushion_frames;
             if (!need_realtime && !need_cushion) {
                 break; // caught up to real time and the cushion is full
             }
@@ -745,6 +783,13 @@ emu_thread(void *data)
         if (ran) {
             publish_frame(app);
             busy_acc += (double)(SDL_GetPerformanceCounter() - busy_start) / counts_per_sec;
+        }
+
+        // Start audio playback only after the ring first holds a full cushion, so
+        // the device never drains an empty ring on the opening frame.
+        if (!audio_started && spu_output_queued() >= g_audio_cushion_frames) {
+            SDL_ResumeAudioStreamDevice(app->audio);
+            audio_started = 1;
         }
 
         if (SDL_GetAtomicInt(&g_perf_hud)) {
@@ -1826,11 +1871,22 @@ jonboy_runapp(int argc, char *argv[])
 
     // Open the audio output stream for SPU/CD sound. A failure here is not
     // fatal: the emulator runs silently.
+    // Let SDL put its audio callback thread on the real-time scheduler. SDL already
+    // runs that thread TIME_CRITICAL; this hint promotes it to SCHED_RR on Linux
+    // (through rtkit over D-Bus, so no elevated privileges are needed). The callback
+    // does only a small, bounded ring copy, so it stays well inside rtkit's runtime
+    // budget. Where rtkit or the permission is absent the request fails and the
+    // thread stays on the normal scheduler, which the cushion still covers. Must be
+    // set before the device opens.
+    SDL_SetHint(SDL_HINT_THREAD_FORCE_REALTIME_TIME_CRITICAL, "1");
+
     SDL_AudioSpec spec = { SDL_AUDIO_S16, 2, AUDIO_RATE };
     app.audio = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
                                           &spec, audio_callback, NULL);
     if (app.audio) {
-        SDL_ResumeAudioStreamDevice(app.audio);
+        // Set the gain now, but leave the device paused. The emu thread resumes it
+        // once it has first filled the ring to the cushion, so the device never
+        // drains an empty ring at startup (which would be an audible opening gap).
         ov_apply_volume(&app); // the configured master volume
     } else {
         SDL_Log("Audio open failed, running silent: %s", SDL_GetError());

@@ -340,3 +340,37 @@ unaffected, since the present path always shows the latest published frame. The
 deterministic run modes do not use the emu thread and are untouched: conformance
 29/29, the save-state determinism self-test passes, and the headless FIFO balance is
 unchanged.
+
+### 2026-11-11, thread priority to halve the audio latency
+
+The 83 ms cushion above is sized for an emu thread at normal scheduling: the depth
+has to cover whatever jitter the scheduler adds before the producer refills the ring.
+Reducing the jitter lets the cushion shrink. Two changes:
+
+- The emu (audio producer) thread calls SDL_SetCurrentThreadPriority(HIGH). On this
+  Linux host that lands as nice -10 on the normal scheduler (confirmed with
+  `ps -L -o cls,ni`: the jonboy-emu thread shows NI=-10, CLS=TS). HIGH, not forced
+  real-time, is deliberate: the emu thread is a long-running compute loop, and a
+  forced real-time compute thread risks rtkit's runtime budget (SIGKILL) and can
+  starve the compositor.
+- SDL_HINT_THREAD_FORCE_REALTIME_TIME_CRITICAL promotes SDL's audio callback thread
+  to the real-time scheduler. It is a small bounded ring copy, so it fits the rtkit
+  budget. On this PipeWire host the callback thread still shows CLS=TS (PipeWire does
+  its real-time work server-side), so the hint is a harmless no-op here but helps on
+  ALSA/Pulse backends.
+
+With the producer at higher priority, the cushion default drops to 40 ms, chosen by
+whether the priority bump was granted (SDL_SetCurrentThreadPriority returns that), so
+a host that denies the priority keeps the 80 ms buffer instead. JONBOY_AUDIO_CUSHION_MS
+overrides it. A deferred audio start (resume the device only once the ring first holds
+a cushion) removes the one opening-frame underrun the tighter cushion otherwise left.
+
+| config (windowed, CT boot + FMV) | cushion | audio underruns/s        |
+|----------------------------------|---------|--------------------------|
+| normal priority                  | 83 ms   | 0 across 96 s            |
+| emu nice -10, aggressive probe   | 20 ms   | 0 across 117 s           |
+| emu nice -10, default + deferred | 40 ms   | 0 across 82 s (startup incl.) |
+
+20 ms held clean on an idle host, so 40 ms is the shipped default for ~2x margin
+against a busier machine, halving the audio latency from the first entry. Regressions
+green: conformance 29/29, save-state determinism self-test passes.
