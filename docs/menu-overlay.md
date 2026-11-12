@@ -345,6 +345,16 @@ A sensible build order, each shippable:
    emu thread reads each pass instead of a one-shot getenv.
 3. Settings dialog and config persistence, including Controller Mapping (replace
    the hardcoded key switch). Now the emulator is configurable without env vars.
+   Done, as a Settings menu rather than a tabbed dialog (minimal needs): Controls...
+   opens the mapping screen and Volume cycles the master gain. The hardcoded
+   pad_bit_for_key switch became a mutable g_keymap table; the mapping screen lists
+   all 16 buttons with their keys, rebinds by keycapture (select a row, press a
+   key), and has a Reset to Defaults row. A jonboy.ini in $XDG_CONFIG_HOME/jonboy
+   (or ~/.config/jonboy) persists aspect, scale, fullscreen, perf HUD, volume, the
+   full keyboard map, and the recent list; it loads at startup (JONBOY_PERF still
+   forces the HUD on for a run) and saves on every overlay close and at shutdown. So
+   Recent now survives restarts too. Gamepad remapping is out of scope here (SDL's
+   gamepad mapping drives the pad); the dialog rebinds the keyboard.
 4. Save-state serialization and the State menu. The largest piece, deferred last so
    the rest ships without it.
 

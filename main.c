@@ -25,29 +25,50 @@
 #include "script.h"
 #include "gdb.h"
 
+// The digital pad buttons in a fixed display order, with the key bound to each.
+// The keyboard map is mutable (Controller Mapping dialog, persisted in the config)
+// so g_keymap[i] is the key for ov_pad_buttons[i].bit.
+#define PAD_BTN_COUNT 16
+static const struct { uint16_t bit; const char *name; } ov_pad_buttons[PAD_BTN_COUNT] = {
+    { PAD_BTN_UP, "Up" },       { PAD_BTN_DOWN, "Down" },
+    { PAD_BTN_LEFT, "Left" },   { PAD_BTN_RIGHT, "Right" },
+    { PAD_BTN_CROSS, "Cross" }, { PAD_BTN_CIRCLE, "Circle" },
+    { PAD_BTN_SQUARE, "Square" }, { PAD_BTN_TRIANGLE, "Triangle" },
+    { PAD_BTN_L1, "L1" },       { PAD_BTN_R1, "R1" },
+    { PAD_BTN_L2, "L2" },       { PAD_BTN_R2, "R2" },
+    { PAD_BTN_L3, "L3" },       { PAD_BTN_R3, "R3" },
+    { PAD_BTN_START, "Start" }, { PAD_BTN_SELECT, "Select" },
+};
+
+static SDL_Keycode g_keymap[PAD_BTN_COUNT] = {
+    SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT,
+    SDLK_Z, SDLK_X, SDLK_A, SDLK_S,
+    SDLK_Q, SDLK_W, SDLK_E, SDLK_R,
+    SDLK_C, SDLK_V, SDLK_RETURN, SDLK_RSHIFT,
+};
+
+static void
+keymap_reset_defaults(void)
+{
+    static const SDL_Keycode defaults[PAD_BTN_COUNT] = {
+        SDLK_UP, SDLK_DOWN, SDLK_LEFT, SDLK_RIGHT,
+        SDLK_Z, SDLK_X, SDLK_A, SDLK_S,
+        SDLK_Q, SDLK_W, SDLK_E, SDLK_R,
+        SDLK_C, SDLK_V, SDLK_RETURN, SDLK_RSHIFT,
+    };
+    memcpy(g_keymap, defaults, sizeof g_keymap);
+}
+
 // Map a host key to a digital pad button bit, or 0 if it is not a pad key.
 static uint16_t
 pad_bit_for_key(SDL_Keycode key)
 {
-    switch (key) {
-    case SDLK_UP:        return PAD_BTN_UP;
-    case SDLK_DOWN:      return PAD_BTN_DOWN;
-    case SDLK_LEFT:      return PAD_BTN_LEFT;
-    case SDLK_RIGHT:     return PAD_BTN_RIGHT;
-    case SDLK_Z:         return PAD_BTN_CROSS;
-    case SDLK_X:         return PAD_BTN_CIRCLE;
-    case SDLK_A:         return PAD_BTN_SQUARE;
-    case SDLK_S:         return PAD_BTN_TRIANGLE;
-    case SDLK_RETURN:    return PAD_BTN_START;
-    case SDLK_RSHIFT:    return PAD_BTN_SELECT;
-    case SDLK_Q:         return PAD_BTN_L1;
-    case SDLK_W:         return PAD_BTN_R1;
-    case SDLK_E:         return PAD_BTN_L2;
-    case SDLK_R:         return PAD_BTN_R2;
-    case SDLK_C:         return PAD_BTN_L3;
-    case SDLK_V:         return PAD_BTN_R3;
-    default:             return 0;
+    for (int i = 0; i < PAD_BTN_COUNT; i++) {
+        if (g_keymap[i] == key) {
+            return ov_pad_buttons[i].bit;
+        }
     }
+    return 0;
 }
 
 // Map an SDL analog axis (-32768..32767) to the pad's 0..255 range, 0x80 center.
@@ -286,10 +307,11 @@ typedef struct {
     SDL_AtomicInt paused_ack;
     SDL_AtomicInt overlay;
 
-    // View settings the menu changes (main-thread owned).
+    // View and audio settings the menu changes (main-thread owned, persisted).
     int aspect_mode;   // 0 = 4:3 letterbox, 1 = stretch, 2 = integer scale
     int scale_idx;     // index into the window-size presets
     int fullscreen;    // 0/1
+    int volume;        // master volume, 0..100
 } AppContext;
 
 // Three linear row-major BGR555 snapshots of VRAM, one per triple-buffer slot,
@@ -723,7 +745,7 @@ reset_machine(void)
 }
 
 // Overlay screens.
-enum { OV_BAR, OV_PICK, OV_ABOUT, OV_RECENT };
+enum { OV_BAR, OV_PICK, OV_ABOUT, OV_RECENT, OV_MAP };
 
 // What a file pick will do once a file is chosen.
 enum { PICK_BOOT, PICK_SWAP, PICK_CARD1, PICK_CARD2 };
@@ -748,6 +770,8 @@ static struct {
     char recent[OV_RECENT_MAX][PATH_MAX];         // most-recently-booted discs
     int recent_count;
 
+    int capturing;                                // mapping dialog: awaiting a key
+
     char status[96];                              // transient one-line message
 } ov;
 
@@ -761,11 +785,11 @@ static const struct { int w, h; const char *name; } ov_scales[] = {
 static const char *const ov_aspect_names[] = { "4:3", "Stretch", "Integer" };
 
 // The menu bar: top menus and their items. Kept as flat tables so navigation and
-// drawing are trivial. The View labels are built dynamically (ov_item_label).
-static const char *const ov_menu_titles[] = { "File", "Cards", "View", "Help" };
-#define OV_MENU_COUNT 4
+// drawing are trivial. The View/Settings labels are built dynamically (ov_item_label).
+static const char *const ov_menu_titles[] = { "File", "Cards", "View", "Settings", "Help" };
+#define OV_MENU_COUNT 5
 
-enum { MENU_FILE, MENU_CARDS, MENU_VIEW, MENU_HELP };
+enum { MENU_FILE, MENU_CARDS, MENU_VIEW, MENU_SETTINGS, MENU_HELP };
 
 static const char *const ov_file_items[] = {
     "Boot Disc...", "Swap Disc...", "Recent", "Close Disc", "Reset", "Exit"
@@ -776,15 +800,19 @@ static const char *const ov_card_items[] = {
 static const char *const ov_view_items[] = {
     "Fullscreen", "VRAM View", "Aspect", "Scale", "Perf HUD"
 };
+static const char *const ov_settings_items[] = {
+    "Controls...", "Volume"
+};
 static const char *const ov_help_items[] = { "About" };
 
 static const char *const *const ov_menu_items[] = {
-    ov_file_items, ov_card_items, ov_view_items, ov_help_items
+    ov_file_items, ov_card_items, ov_view_items, ov_settings_items, ov_help_items
 };
 static const int ov_menu_item_count[] = {
     (int)(sizeof ov_file_items / sizeof ov_file_items[0]),
     (int)(sizeof ov_card_items / sizeof ov_card_items[0]),
     (int)(sizeof ov_view_items / sizeof ov_view_items[0]),
+    (int)(sizeof ov_settings_items / sizeof ov_settings_items[0]),
     (int)(sizeof ov_help_items / sizeof ov_help_items[0]),
 };
 
@@ -800,6 +828,11 @@ ov_item_label(AppContext *app, int menu, int i, char *buf, size_t n)
         case 2: SDL_snprintf(buf, n, "Aspect       %s", ov_aspect_names[app->aspect_mode]); return;
         case 3: SDL_snprintf(buf, n, "Scale        %s", ov_scales[app->scale_idx].name); return;
         case 4: SDL_snprintf(buf, n, "Perf HUD     %s", SDL_GetAtomicInt(&g_perf_hud) ? "on" : "off"); return;
+        }
+    } else if (menu == MENU_SETTINGS) {
+        switch (i) {
+        case 0: SDL_snprintf(buf, n, "Controls..."); return;
+        case 1: SDL_snprintf(buf, n, "Volume       %d%%", app->volume); return;
         }
     }
     SDL_snprintf(buf, n, "%s", ov_menu_items[menu][i]);
@@ -824,13 +857,26 @@ ov_recent_add(const char *path)
     SDL_strlcpy(ov.recent[0], path, sizeof ov.recent[0]);
 }
 
+// Apply the configured master volume to the audio stream.
+static void
+ov_apply_volume(AppContext *app)
+{
+    if (app->audio) {
+        SDL_SetAudioStreamGain(app->audio, app->volume / 100.0f);
+    }
+}
+
+static void ov_config_save(AppContext *app); // persist on close
+
 // Pause the core and wait until the emu thread has parked at a frame boundary, so
-// the menu actions can touch core state safely. Mutes audio while open.
+// the menu actions can touch core state safely. Audio goes quiet on its own while
+// paused, as the SPU ring drains and the callback pads silence.
 static void
 overlay_open(AppContext *app)
 {
     ov.screen = OV_BAR;
     ov.status[0] = '\0';
+    ov.capturing = 0;
     SDL_SetAtomicInt(&app->overlay, 1);
     SDL_SetAtomicInt(&app->paused, 1);
 
@@ -838,18 +884,12 @@ overlay_open(AppContext *app)
            && SDL_GetAtomicInt(&app->running)) {
         SDL_Delay(1);
     }
-
-    if (app->audio) {
-        SDL_SetAudioStreamGain(app->audio, 0.0f);
-    }
 }
 
 static void
 overlay_close(AppContext *app)
 {
-    if (app->audio) {
-        SDL_SetAudioStreamGain(app->audio, 1.0f);
-    }
+    ov_config_save(app); // persist any settings changed while open
     SDL_SetAtomicInt(&app->paused, 0);
     SDL_SetAtomicInt(&app->overlay, 0);
 }
@@ -1084,6 +1124,110 @@ ov_toggle_perf_hud(void)
     SDL_snprintf(ov.status, sizeof ov.status, "perf HUD: %s", on ? "on" : "off");
 }
 
+static void
+ov_cycle_volume(AppContext *app)
+{
+    // 100 -> 75 -> 50 -> 25 -> 0 -> 100
+    app->volume = (app->volume <= 0) ? 100 : app->volume - 25;
+    ov_apply_volume(app);
+    SDL_snprintf(ov.status, sizeof ov.status, "volume: %d%%", app->volume);
+}
+
+// ---- config persistence (jonboy.ini) ----
+
+static void
+ov_config_dir(char *buf, size_t n)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    const char *home = getenv("HOME");
+    if (xdg && xdg[0]) {
+        SDL_snprintf(buf, n, "%s/jonboy", xdg);
+    } else if (home && home[0]) {
+        SDL_snprintf(buf, n, "%s/.config/jonboy", home);
+    } else {
+        SDL_snprintf(buf, n, ".");
+    }
+}
+
+static void
+ov_config_save(AppContext *app)
+{
+    char dir[PATH_MAX], path[PATH_MAX];
+    ov_config_dir(dir, sizeof dir);
+    mkdir(dir, 0755); // ignore EEXIST
+    SDL_snprintf(path, sizeof path, "%s/jonboy.ini", dir);
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        return;
+    }
+    fprintf(f, "aspect=%d\n", app->aspect_mode);
+    fprintf(f, "scale=%d\n", app->scale_idx);
+    fprintf(f, "fullscreen=%d\n", app->fullscreen);
+    fprintf(f, "perf_hud=%d\n", SDL_GetAtomicInt(&g_perf_hud));
+    fprintf(f, "volume=%d\n", app->volume);
+    for (int i = 0; i < PAD_BTN_COUNT; i++) {
+        fprintf(f, "key.%s=%u\n", ov_pad_buttons[i].name, (unsigned)g_keymap[i]);
+    }
+    for (int i = 0; i < ov.recent_count; i++) {
+        fprintf(f, "recent=%s\n", ov.recent[i]);
+    }
+    fclose(f);
+}
+
+static void
+ov_config_load(AppContext *app)
+{
+    char dir[PATH_MAX], path[PATH_MAX];
+    ov_config_dir(dir, sizeof dir);
+    SDL_snprintf(path, sizeof path, "%s/jonboy.ini", dir);
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return;
+    }
+    char line[PATH_MAX + 64];
+    while (fgets(line, sizeof line, f)) {
+        char *nl = strpbrk(line, "\r\n");
+        if (nl) {
+            *nl = '\0';
+        }
+        char *eq = strchr(line, '=');
+        if (!eq) {
+            continue;
+        }
+        *eq = '\0';
+        const char *key = line, *val = eq + 1;
+
+        if (strcmp(key, "aspect") == 0) {
+            app->aspect_mode = ((atoi(val) % 3) + 3) % 3;
+        } else if (strcmp(key, "scale") == 0) {
+            int s = atoi(val);
+            if (s >= 0 && s < OV_SCALE_COUNT) app->scale_idx = s;
+        } else if (strcmp(key, "fullscreen") == 0) {
+            app->fullscreen = atoi(val) ? 1 : 0;
+        } else if (strcmp(key, "perf_hud") == 0) {
+            SDL_SetAtomicInt(&g_perf_hud, atoi(val) ? 1 : 0);
+        } else if (strcmp(key, "volume") == 0) {
+            int v = atoi(val);
+            app->volume = v < 0 ? 0 : (v > 100 ? 100 : v);
+        } else if (strcmp(key, "recent") == 0) {
+            if (ov.recent_count < OV_RECENT_MAX && val[0]) {
+                SDL_strlcpy(ov.recent[ov.recent_count], val, sizeof ov.recent[0]);
+                ov.recent_count++;
+            }
+        } else if (strncmp(key, "key.", 4) == 0) {
+            for (int i = 0; i < PAD_BTN_COUNT; i++) {
+                if (strcmp(key + 4, ov_pad_buttons[i].name) == 0) {
+                    g_keymap[i] = (SDL_Keycode)strtoul(val, NULL, 10);
+                    break;
+                }
+            }
+        }
+    }
+    fclose(f);
+}
+
 // Run the highlighted menu-bar item. Returns 1 if the overlay should close.
 static int
 ov_activate(AppContext *app)
@@ -1111,6 +1255,11 @@ ov_activate(AppContext *app)
         case 2: app->aspect_mode = (app->aspect_mode + 1) % 3; ov_apply_aspect(app); return 0;
         case 3: app->scale_idx = (app->scale_idx + 1) % OV_SCALE_COUNT; ov_apply_scale(app); return 0;
         case 4: ov_toggle_perf_hud(); return 0;
+        }
+    } else if (ov.menu == MENU_SETTINGS) {
+        switch (ov.item) {
+        case 0: ov.screen = OV_MAP; ov.sel = 0; ov.scroll = 0; ov.capturing = 0; return 0;
+        case 1: ov_cycle_volume(app); return 0;
         }
     } else if (ov.menu == MENU_HELP) {
         ov.screen = OV_ABOUT;
@@ -1167,6 +1316,33 @@ overlay_nav(AppContext *app, int nav)
         return 0;
     }
 
+    if (ov.screen == OV_MAP) {
+        // Row PAD_BTN_COUNT is the "Reset to Defaults" action.
+        switch (nav) {
+        case NAV_UP:
+            if (ov.sel > 0) ov.sel--;
+            break;
+        case NAV_DOWN:
+            if (ov.sel < PAD_BTN_COUNT) ov.sel++;
+            break;
+        case NAV_OK:
+            if (ov.sel == PAD_BTN_COUNT) {
+                keymap_reset_defaults();
+                SDL_snprintf(ov.status, sizeof ov.status, "defaults restored");
+            } else {
+                ov.capturing = 1; // next key press binds this button
+                SDL_snprintf(ov.status, sizeof ov.status,
+                             "press a key for %s (Esc cancels)",
+                             ov_pad_buttons[ov.sel].name);
+            }
+            break;
+        case NAV_BACK:
+            ov.screen = OV_BAR;
+            break;
+        }
+        return 0;
+    }
+
     // OV_BAR
     switch (nav) {
     case NAV_LEFT:
@@ -1195,6 +1371,19 @@ overlay_nav(AppContext *app, int nav)
 static int
 overlay_key(AppContext *app, SDL_Keycode key)
 {
+    // Controller Mapping is waiting to bind the selected button to a key.
+    if (ov.capturing) {
+        if (key != SDLK_ESCAPE) {
+            g_keymap[ov.sel] = key;
+            SDL_snprintf(ov.status, sizeof ov.status, "%s = %s",
+                         ov_pad_buttons[ov.sel].name, SDL_GetKeyName(key));
+        } else {
+            SDL_snprintf(ov.status, sizeof ov.status, "rebind cancelled");
+        }
+        ov.capturing = 0;
+        return 0;
+    }
+
     switch (key) {
     case SDLK_UP:     return overlay_nav(app, NAV_UP);
     case SDLK_DOWN:   return overlay_nav(app, NAV_DOWN);
@@ -1300,6 +1489,30 @@ overlay_draw(AppContext *app)
         }
         ov_text(r, px + 6, py + ph - 12, 150, 150, 170,
                 "Up/Down move  Z/Enter boot  X/Esc back");
+    } else if (ov.screen == OV_MAP) {
+        int px = 160, py = 36, pw = 320, ph = 300, rowh = 15;
+        ov_fill(r, px, py, pw, ph, 24, 28, 44, 245);
+        ov_fill(r, px, py, pw, 16, 40, 48, 72, 255);
+        ov_text(r, px + 6, py + 4, 230, 230, 240, "Controller Mapping");
+
+        int list_y = py + 24;
+        for (int i = 0; i < PAD_BTN_COUNT; i++) {
+            int ry = list_y + i * rowh;
+            if (i == ov.sel) {
+                ov_fill(r, px + 4, ry - 1, pw - 8, rowh, 60, 90, 160, 255);
+            }
+            ov_text(r, px + 10, ry, 210, 210, 230, ov_pad_buttons[i].name);
+            const char *kn = (ov.capturing && i == ov.sel)
+                             ? "<press a key>" : SDL_GetKeyName(g_keymap[i]);
+            ov_text(r, px + 150, ry, 230, 230, 160, kn[0] ? kn : "(unset)");
+        }
+        int rry = list_y + PAD_BTN_COUNT * rowh + 4;
+        if (ov.sel == PAD_BTN_COUNT) {
+            ov_fill(r, px + 4, rry - 1, pw - 8, rowh, 60, 90, 160, 255);
+        }
+        ov_text(r, px + 10, rry, 200, 200, 160, "Reset to Defaults");
+        ov_text(r, px + 6, py + ph - 12, 150, 150, 170,
+                "Z/Enter rebind  X/Esc back");
     } else if (ov.screen == OV_PICK) {
         int px = 40, py = 48, pw = 560, ph = 384;
         ov_fill(r, px, py, pw, ph, 24, 28, 44, 245);
@@ -1372,7 +1585,17 @@ jonboy_runapp(int argc, char *argv[])
 
     AppContext app = { 0 };
     SDL_SetAtomicInt(&app.running, 1);
-    SDL_SetAtomicInt(&g_perf_hud, getenv("JONBOY_PERF") != NULL);
+
+    // Defaults, then the saved config (jonboy.ini) overrides them, then JONBOY_PERF
+    // forces the HUD on for this run if set. These populate app fields, the keyboard
+    // map, and the recent list; the display and audio values are realized once the
+    // window, renderer, and audio stream exist below.
+    app.scale_idx = 1;   // 960x720, matching the window created below
+    app.volume = 100;
+    ov_config_load(&app);
+    if (getenv("JONBOY_PERF") != NULL) {
+        SDL_SetAtomicInt(&g_perf_hud, 1);
+    }
 
     // 2. Create an SDL3 window and hardware-accelerated renderer. The PSX display
     // is 4:3 on a TV whatever its internal pixel resolution, so the window opens
@@ -1387,13 +1610,14 @@ jonboy_runapp(int argc, char *argv[])
     // Present into a 4:3 logical area: the picture always keeps the 4:3 aspect, and
     // a window with a different aspect is pillarboxed or letterboxed with the clear
     // color rather than stretching the image. Everything below draws to the whole
-    // logical area (a NULL destination), so SDL applies the scaling and bars.
-    SDL_SetRenderLogicalPresentation(app.renderer, 640, 480,
-                                     SDL_LOGICAL_PRESENTATION_LETTERBOX);
-    // View-menu state starts matched to the window created above (4:3 letterbox at
-    // 960x720), so the menu labels read true from the first open.
-    app.aspect_mode = 0;
-    app.scale_idx = 1;
+    // logical area (a NULL destination), so SDL applies the scaling and bars. The
+    // mode, window size, and fullscreen come from the loaded config.
+    ov_apply_aspect(&app);
+    if (app.fullscreen) {
+        SDL_SetWindowFullscreen(app.window, true);
+    } else {
+        ov_apply_scale(&app);
+    }
 
     // Pace presentation to the display refresh so the main thread does not spin.
     // The emulation thread keeps its own real-time pacing independently.
@@ -1447,6 +1671,7 @@ jonboy_runapp(int argc, char *argv[])
                                           &spec, audio_callback, NULL);
     if (app.audio) {
         SDL_ResumeAudioStreamDevice(app.audio);
+        ov_apply_volume(&app); // the configured master volume
     } else {
         SDL_Log("Audio open failed, running silent: %s", SDL_GetError());
     }
@@ -1623,6 +1848,7 @@ jonboy_runapp(int argc, char *argv[])
 
     // 6. Clean Cleanup Strategy: stop the emu thread before tearing anything down.
     SDL_SetAtomicInt(&app.running, 0);
+    ov_config_save(&app); // persist settings even if quit bypassed the menu
     if (app.emu) {
         SDL_WaitThread(app.emu, NULL);
     }
