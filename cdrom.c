@@ -1,4 +1,5 @@
 #include "cdrom.h"
+#include "savestate.h"
 #include "cpu.h"
 #include "mem.h"
 #include "spu.h"
@@ -1244,4 +1245,24 @@ psx_cdrom_write(uint32_t phys_addr, uint32_t value, int size)
     default:
         break;
     }
+}
+
+// Save-state (docs/menu-overlay.md): serialize only the drive controller state
+// (cd). The mounted disc image (disc) and the prefetch worker (pf) are host-side
+// media and I/O, not game state, so they are left as they are. On load the prefetch
+// cache is invalidated (pf_resume_reset) so no stale sector is served at the
+// restored position.
+int
+cdrom_state_save(FILE *f)
+{
+    return SS_WR(f, &cd, sizeof cd) ? 0 : -1;
+}
+
+int
+cdrom_state_load(FILE *f)
+{
+    pf_suspend();
+    int ok = SS_RD(f, &cd, sizeof cd);
+    pf_resume_reset();
+    return ok ? 0 : -1;
 }

@@ -1,6 +1,7 @@
 #include "pad.h"
 #include "cpu.h"
 #include "mc.h"
+#include "savestate.h"
 #include <string.h>
 
 // SIO0 (the two controller / memory-card ports). The BIOS/game addresses a
@@ -91,6 +92,21 @@ int
 pad_analog_mode(void)
 {
     return pad.analog_mode;
+}
+
+// The SIO transaction and controller mode are live machine state. The pressed
+// buttons and stick positions are host input (pad_buttons and the stick globals),
+// not captured here: on load they keep whatever the host is currently feeding.
+int
+pad_state_save(FILE *f)
+{
+    return (SS_WR(f, &sio, sizeof sio) && SS_WR(f, &pad, sizeof pad)) ? 0 : -1;
+}
+
+int
+pad_state_load(FILE *f)
+{
+    return (SS_RD(f, &sio, sizeof sio) && SS_RD(f, &pad, sizeof pad)) ? 0 : -1;
 }
 
 // Advance the pending device acknowledge. Called every step from the hardware

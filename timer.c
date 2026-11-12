@@ -1,4 +1,5 @@
 #include "timer.h"
+#include "savestate.h"
 #include "cpu.h"
 
 // Mode register bits we act on. The sync bits (0-2) are stored but not yet
@@ -203,4 +204,16 @@ timer_next_event(void)
     }
 
     return best ? best : 1;
+}
+
+int
+timer_state_save(FILE *f)
+{
+    return SS_WR(f, timers, sizeof timers) ? 0 : -1;
+}
+
+int
+timer_state_load(FILE *f)
+{
+    return SS_RD(f, timers, sizeof timers) ? 0 : -1;
 }

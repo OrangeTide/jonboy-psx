@@ -24,6 +24,7 @@
 #include "sched.h"
 #include "script.h"
 #include "gdb.h"
+#include "savestate.h"
 
 // The digital pad buttons in a fixed display order, with the key bound to each.
 // The keyboard map is mutable (Controller Mapping dialog, persisted in the config)
@@ -148,6 +149,10 @@ static const char *g_cd_path = NULL;         // disc image to mount (.bin/.cue)
 static const char *g_memcard_path = NULL;    // slot-1 memory-card image (raw 128 KB)
 static const char *g_memcard2_path = NULL;   // slot-2 memory-card image (raw 128 KB)
 static const char *g_script_path = NULL;     // timed system-event script file
+
+// The disc currently mounted (startup --cd or a menu boot/swap). Save-state slots
+// are keyed by this so one game's slots do not collide with another's.
+static char g_current_disc[PATH_MAX];
 
 #define TARGET_FPS 60
 
@@ -745,7 +750,9 @@ reset_machine(void)
 }
 
 // Overlay screens.
-enum { OV_BAR, OV_PICK, OV_ABOUT, OV_RECENT, OV_MAP };
+enum { OV_BAR, OV_PICK, OV_ABOUT, OV_RECENT, OV_MAP, OV_SAVE, OV_LOAD };
+
+#define OV_STATE_SLOTS 9
 
 // What a file pick will do once a file is chosen.
 enum { PICK_BOOT, PICK_SWAP, PICK_CARD1, PICK_CARD2 };
@@ -786,13 +793,16 @@ static const char *const ov_aspect_names[] = { "4:3", "Stretch", "Integer" };
 
 // The menu bar: top menus and their items. Kept as flat tables so navigation and
 // drawing are trivial. The View/Settings labels are built dynamically (ov_item_label).
-static const char *const ov_menu_titles[] = { "File", "Cards", "View", "Settings", "Help" };
-#define OV_MENU_COUNT 5
+static const char *const ov_menu_titles[] = { "File", "State", "Cards", "View", "Settings", "Help" };
+#define OV_MENU_COUNT 6
 
-enum { MENU_FILE, MENU_CARDS, MENU_VIEW, MENU_SETTINGS, MENU_HELP };
+enum { MENU_FILE, MENU_STATE, MENU_CARDS, MENU_VIEW, MENU_SETTINGS, MENU_HELP };
 
 static const char *const ov_file_items[] = {
     "Boot Disc...", "Swap Disc...", "Recent", "Close Disc", "Reset", "Exit"
+};
+static const char *const ov_state_items[] = {
+    "Save State...", "Load State..."
 };
 static const char *const ov_card_items[] = {
     "Insert Card 1...", "Eject Card 1", "Insert Card 2...", "Eject Card 2"
@@ -806,10 +816,12 @@ static const char *const ov_settings_items[] = {
 static const char *const ov_help_items[] = { "About" };
 
 static const char *const *const ov_menu_items[] = {
-    ov_file_items, ov_card_items, ov_view_items, ov_settings_items, ov_help_items
+    ov_file_items, ov_state_items, ov_card_items, ov_view_items,
+    ov_settings_items, ov_help_items
 };
 static const int ov_menu_item_count[] = {
     (int)(sizeof ov_file_items / sizeof ov_file_items[0]),
+    (int)(sizeof ov_state_items / sizeof ov_state_items[0]),
     (int)(sizeof ov_card_items / sizeof ov_card_items[0]),
     (int)(sizeof ov_view_items / sizeof ov_view_items[0]),
     (int)(sizeof ov_settings_items / sizeof ov_settings_items[0]),
@@ -875,6 +887,8 @@ static void
 overlay_open(AppContext *app)
 {
     ov.screen = OV_BAR;
+    ov.menu = 0;  // reopen on the first menu, so each open starts predictably
+    ov.item = 0;
     ov.status[0] = '\0';
     ov.capturing = 0;
     SDL_SetAtomicInt(&app->overlay, 1);
@@ -1014,6 +1028,7 @@ ov_boot_disc(AppContext *app, const char *full)
         reset_machine();
         app->have_frame = 0;
         ov_recent_add(full);
+        SDL_strlcpy(g_current_disc, full, sizeof g_current_disc);
         return 1; // resume into the booting disc
     }
     SDL_snprintf(ov.status, sizeof ov.status, "mount failed");
@@ -1045,6 +1060,7 @@ ov_pick_choose(AppContext *app)
     case PICK_SWAP:
         cdrom_eject();
         cdrom_mount(full);
+        SDL_strlcpy(g_current_disc, full, sizeof g_current_disc);
         return 1; // hot swap, raises the lid INT5
     case PICK_CARD1:
         mc_mount_slot(0, full);
@@ -1228,6 +1244,65 @@ ov_config_load(AppContext *app)
     fclose(f);
 }
 
+// ---- save states ----
+
+// Build the file path for a slot, keyed by a hash of the mounted disc so each
+// game's slots are separate. Creates the directories as needed.
+static void
+ov_state_path(int slot, char *buf, size_t n)
+{
+    char dir[PATH_MAX], sub[PATH_MAX];
+    ov_config_dir(dir, sizeof dir);
+
+    const char *id = g_current_disc[0] ? g_current_disc : "bios";
+    uint32_t h = 5381;
+    for (const char *p = id; *p; p++) {
+        h = h * 33u + (unsigned char)*p;
+    }
+
+    mkdir(dir, 0755);
+    SDL_snprintf(sub, sizeof sub, "%s/states", dir);
+    mkdir(sub, 0755);
+    SDL_snprintf(sub, sizeof sub, "%s/states/%08x", dir, h);
+    mkdir(sub, 0755);
+    SDL_snprintf(buf, n, "%s/slot%d.sav", sub, slot);
+}
+
+static int
+ov_slot_exists(int slot)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    ov_state_path(slot, path, sizeof path);
+    return stat(path, &st) == 0;
+}
+
+static void
+ov_do_save(int slot)
+{
+    char path[PATH_MAX];
+    ov_state_path(slot, path, sizeof path);
+    if (savestate_save(path) == 0) {
+        SDL_snprintf(ov.status, sizeof ov.status, "saved to slot %d", slot);
+    } else {
+        SDL_snprintf(ov.status, sizeof ov.status, "save to slot %d failed", slot);
+    }
+}
+
+// Returns 1 if the overlay should close (resume the loaded state).
+static int
+ov_do_load(AppContext *app, int slot)
+{
+    char path[PATH_MAX];
+    ov_state_path(slot, path, sizeof path);
+    if (savestate_load(path) == 0) {
+        app->have_frame = 0;
+        return 1;
+    }
+    SDL_snprintf(ov.status, sizeof ov.status, "slot %d is empty or invalid", slot);
+    return 0;
+}
+
 // Run the highlighted menu-bar item. Returns 1 if the overlay should close.
 static int
 ov_activate(AppContext *app)
@@ -1240,6 +1315,11 @@ ov_activate(AppContext *app)
         case 3: cdrom_eject(); SDL_snprintf(ov.status, sizeof ov.status, "disc ejected"); return 0;
         case 4: reset_machine(); app->have_frame = 0; return 1;
         case 5: SDL_SetAtomicInt(&app->running, 0); return 1;
+        }
+    } else if (ov.menu == MENU_STATE) {
+        switch (ov.item) {
+        case 0: ov.screen = OV_SAVE; ov.sel = 0; return 0;
+        case 1: ov.screen = OV_LOAD; ov.sel = 0; return 0;
         }
     } else if (ov.menu == MENU_CARDS) {
         switch (ov.item) {
@@ -1334,6 +1414,28 @@ overlay_nav(AppContext *app, int nav)
                 SDL_snprintf(ov.status, sizeof ov.status,
                              "press a key for %s (Esc cancels)",
                              ov_pad_buttons[ov.sel].name);
+            }
+            break;
+        case NAV_BACK:
+            ov.screen = OV_BAR;
+            break;
+        }
+        return 0;
+    }
+
+    if (ov.screen == OV_SAVE || ov.screen == OV_LOAD) {
+        switch (nav) {
+        case NAV_UP:
+            if (ov.sel > 0) ov.sel--;
+            break;
+        case NAV_DOWN:
+            if (ov.sel < OV_STATE_SLOTS - 1) ov.sel++;
+            break;
+        case NAV_OK:
+            if (ov.screen == OV_SAVE) {
+                ov_do_save(ov.sel + 1);
+            } else {
+                return ov_do_load(app, ov.sel + 1);
             }
             break;
         case NAV_BACK:
@@ -1513,6 +1615,26 @@ overlay_draw(AppContext *app)
         ov_text(r, px + 10, rry, 200, 200, 160, "Reset to Defaults");
         ov_text(r, px + 6, py + ph - 12, 150, 150, 170,
                 "Z/Enter rebind  X/Esc back");
+    } else if (ov.screen == OV_SAVE || ov.screen == OV_LOAD) {
+        int px = 150, py = 40, pw = 340, ph = 220, rowh = 16;
+        ov_fill(r, px, py, pw, ph, 24, 28, 44, 245);
+        ov_fill(r, px, py, pw, 16, 40, 48, 72, 255);
+        ov_text(r, px + 6, py + 4, 230, 230, 240,
+                ov.screen == OV_SAVE ? "Save State" : "Load State");
+        int list_y = py + 26;
+        for (int i = 0; i < OV_STATE_SLOTS; i++) {
+            int ry = list_y + i * rowh;
+            if (i == ov.sel) {
+                ov_fill(r, px + 4, ry - 1, pw - 8, rowh, 60, 90, 160, 255);
+            }
+            char line[48];
+            SDL_snprintf(line, sizeof line, "Slot %d   %s", i + 1,
+                         ov_slot_exists(i + 1) ? "saved" : "empty");
+            ov_text(r, px + 10, ry, 230, 230, 240, line);
+        }
+        ov_text(r, px + 6, py + ph - 12, 150, 150, 170,
+                ov.screen == OV_SAVE ? "Z/Enter save  X/Esc back"
+                                     : "Z/Enter load  X/Esc back");
     } else if (ov.screen == OV_PICK) {
         int px = 40, py = 48, pw = 560, ph = 384;
         ov_fill(r, px, py, pw, ph, 24, 28, 44, 245);
@@ -1595,6 +1717,9 @@ jonboy_runapp(int argc, char *argv[])
     ov_config_load(&app);
     if (getenv("JONBOY_PERF") != NULL) {
         SDL_SetAtomicInt(&g_perf_hud, 1);
+    }
+    if (g_cd_path) {
+        SDL_strlcpy(g_current_disc, g_cd_path, sizeof g_current_disc); // for state slots
     }
 
     // 2. Create an SDL3 window and hardware-accelerated renderer. The PSX display
@@ -2658,6 +2783,8 @@ print_usage(const char *prog)
             "  %s --bench [opts]               measure core wall time per frame\n"
             "  %s --gdb [port]                 boot under a gdb remote server\n"
             "                                  (default port 1234, loopback only)\n"
+            "  %s --savestate-selftest [opts]  prove a save/load round-trip is\n"
+            "                                  deterministic (--steps sets warmup depth)\n"
             "Boot options (also apply to the windowed emulator):\n"
             "  --bios <file>       BIOS image to load (default bios.bin)\n"
             "  --psio              inject the PSIO boot stub over the BIOS entry\n"
@@ -2677,7 +2804,114 @@ print_usage(const char *prog)
             "  --pc <hex>          entry PC (default = load address)\n"
             "  --steps <n>         max instructions to run\n"
             "  --vram-out <file>   write the 320x240 VRAM region as a PPM image\n",
-            prog, prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog, prog);
+}
+
+// Byte-compare two files. Returns 0 if identical, -1 otherwise.
+static int
+files_equal(const char *pa, const char *pb)
+{
+    FILE *a = fopen(pa, "rb");
+    FILE *b = fopen(pb, "rb");
+    int eq = (a && b);
+    if (a && b) {
+        for (;;) {
+            char ba[65536], bb[65536];
+            size_t na = fread(ba, 1, sizeof ba, a);
+            size_t nb = fread(bb, 1, sizeof bb, b);
+            if (na != nb || memcmp(ba, bb, na) != 0) {
+                eq = 0;
+                break;
+            }
+            if (na == 0) {
+                break;
+            }
+        }
+    }
+    if (a) {
+        fclose(a);
+    }
+    if (b) {
+        fclose(b);
+    }
+    return eq ? 0 : -1;
+}
+
+// Deterministic save-state round-trip test. It boots the BIOS (and any mounted
+// disc) headless, then proves that a saved state fully and exactly captures the
+// machine:
+//   1. run warmup steps to reach state N, save it as A;
+//   2. run span more steps to state N+M, save it as B (the reference future);
+//   3. reload A, re-save as A2, and confirm A == A2 (save/load is idempotent, so
+//      no mutable state is dropped on the way through a file);
+//   4. from the reloaded A, run span steps again and save as C.
+// If serialization is complete and load is exact, B and C are byte-identical:
+// the state at N determined the next M steps with no hidden carry. A divergence
+// means some live state was not captured. No SDL, no timing, fully reproducible.
+static int
+run_savestate_selftest(uint64_t warmup, uint64_t span)
+{
+    char pa[64], pb[64], pc[64], pa2[64];
+    unsigned tag = (unsigned)(SDL_GetPerformanceCounter() & 0xFFFFFFu);
+    SDL_snprintf(pa, sizeof pa, "/tmp/jbss_%06x_a.sav", tag);
+    SDL_snprintf(pb, sizeof pb, "/tmp/jbss_%06x_b.sav", tag);
+    SDL_snprintf(pc, sizeof pc, "/tmp/jbss_%06x_c.sav", tag);
+    SDL_snprintf(pa2, sizeof pa2, "/tmp/jbss_%06x_a2.sav", tag);
+
+    if (mem_load_bios(g_bios_path) != 0) {
+        fprintf(stderr, "selftest: need a BIOS (--bios)\n");
+        return 1;
+    }
+    if (g_cd_path && cdrom_mount(g_cd_path) == 0) {
+        printf("selftest: mounted disc %s\n", g_cd_path);
+    }
+    cpu_reset(0xBFC00000);
+    cpu.halt_on_break = 1;
+
+    printf("selftest: warmup %llu steps...\n", (unsigned long long)warmup);
+    for (uint64_t i = 0; i < warmup && !cpu.halted; i++) {
+        step_cpu();
+    }
+    if (savestate_save(pa) != 0) {
+        fprintf(stderr, "selftest: save A failed\n");
+        return 1;
+    }
+
+    for (uint64_t i = 0; i < span && !cpu.halted; i++) {
+        step_cpu();
+    }
+    if (savestate_save(pb) != 0) {
+        fprintf(stderr, "selftest: save B failed\n");
+        return 1;
+    }
+
+    if (savestate_load(pa) != 0 || savestate_save(pa2) != 0) {
+        fprintf(stderr, "selftest: reload/resave A failed\n");
+        return 1;
+    }
+    int idempotent = (files_equal(pa, pa2) == 0);
+
+    for (uint64_t i = 0; i < span && !cpu.halted; i++) {
+        step_cpu();
+    }
+    if (savestate_save(pc) != 0) {
+        fprintf(stderr, "selftest: save C failed\n");
+        return 1;
+    }
+    int deterministic = (files_equal(pb, pc) == 0);
+
+    remove(pa);
+    remove(pb);
+    remove(pc);
+    remove(pa2);
+
+    printf("selftest: idempotent reload   %s\n", idempotent ? "PASS" : "FAIL");
+    printf("selftest: deterministic replay %s (warmup=%llu span=%llu)\n",
+           deterministic ? "PASS" : "FAIL",
+           (unsigned long long)warmup, (unsigned long long)span);
+    int ok = idempotent && deterministic;
+    printf("RESULT: save-state self-test %s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
 }
 
 int
@@ -2687,6 +2921,7 @@ main(int argc, char *argv[])
     const char *exe_file = NULL;
     const char *vram_out = NULL;
     int boot_mode = 0;
+    int selftest_mode = 0;
     int bench_mode = 0;
     uint32_t bench_warmup = 300;   // frames to run before measuring (past boot)
     uint32_t bench_frames = 600;   // frames to measure (~10 s console time)
@@ -2755,6 +2990,8 @@ main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--steps") == 0 && i + 1 < argc) {
             max_steps = strtoull(argv[++i], NULL, 0);
             have_steps = 1;
+        } else if (strcmp(argv[i], "--savestate-selftest") == 0) {
+            selftest_mode = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -2782,6 +3019,13 @@ main(int argc, char *argv[])
             return 1;
         }
         return run_bench(bench_warmup, bench_frames);
+    }
+
+    if (selftest_mode) {
+        // --steps sets the warmup depth (default 20M, well past BIOS POST into
+        // GPU/DMA/timer activity); the replay span is a quarter of that.
+        uint64_t warmup = have_steps ? max_steps : 20000000;
+        return run_savestate_selftest(warmup, warmup / 4 + 1);
     }
 
     if (boot_mode) {

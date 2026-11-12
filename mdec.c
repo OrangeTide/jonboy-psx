@@ -1,4 +1,5 @@
 #include "mdec.h"
+#include "savestate.h"
 
 #include <string.h>
 
@@ -559,4 +560,16 @@ mdec_get_stats(uint32_t *decodes, uint32_t *color_macroblocks,
     if (color_macroblocks) *color_macroblocks = mdec.stat_color_mb;
 
     if (mono_blocks) *mono_blocks = mdec.stat_mono_blk;
+}
+
+int
+mdec_state_save(FILE *f)
+{
+    return SS_WR(f, &mdec, sizeof mdec) ? 0 : -1;
+}
+
+int
+mdec_state_load(FILE *f)
+{
+    return SS_RD(f, &mdec, sizeof mdec) ? 0 : -1;
 }

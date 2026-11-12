@@ -1,5 +1,6 @@
 #include "xa.h"
 #include "spu.h"
+#include "savestate.h"
 #include <string.h>
 
 // XA-ADPCM decoder. See xa.h for the interface.
@@ -45,6 +46,18 @@ void
 xa_reset(void)
 {
     memset(&xa, 0, sizeof xa);
+}
+
+int
+xa_state_save(FILE *f)
+{
+    return SS_WR(f, &xa, sizeof xa) ? 0 : -1;
+}
+
+int
+xa_state_load(FILE *f)
+{
+    return SS_RD(f, &xa, sizeof xa) ? 0 : -1;
 }
 
 static int16_t

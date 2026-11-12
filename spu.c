@@ -1,4 +1,5 @@
 #include "spu.h"
+#include "savestate.h"
 #include "cpu.h"
 #include "lebytes.h"
 
@@ -929,4 +930,51 @@ int
 spu_output_capacity(void)
 {
     return SPU_RING_FRAMES;
+}
+
+// Serialize the SPU's game state. The ADSR rate tables (env_denom, env_num_inc,
+// env_num_dec) are constant lookups rebuilt identically every run, so they are not
+// saved. The output ring and CD FIFO are included so audio resumes seamlessly.
+int
+spu_state_save(FILE *f)
+{
+    return (SS_WR(f, spu_regs, sizeof spu_regs)
+            && SS_WR(f, spu_ram, sizeof spu_ram)
+            && SS_WR(f, &spu_endx, sizeof spu_endx)
+            && SS_WR(f, &spu_irq_flag, sizeof spu_irq_flag)
+            && SS_WR(f, voices, sizeof voices)
+            && SS_WR(f, voice_sweep, sizeof voice_sweep)
+            && SS_WR(f, main_sweep, sizeof main_sweep)
+            && SS_WR(f, spu_ring, sizeof spu_ring)
+            && SS_WR(f, &spu_ring_w, sizeof spu_ring_w)
+            && SS_WR(f, &spu_ring_r, sizeof spu_ring_r)
+            && SS_WR(f, cd_fifo, sizeof cd_fifo)
+            && SS_WR(f, &cd_fifo_w, sizeof cd_fifo_w)
+            && SS_WR(f, &cd_fifo_r, sizeof cd_fifo_r)
+            && SS_WR(f, &spu_cycle_acc, sizeof spu_cycle_acc)
+            && SS_WR(f, &spu_noise_val, sizeof spu_noise_val)
+            && SS_WR(f, &spu_noise_count, sizeof spu_noise_count)
+            && SS_WR(f, &rvb, sizeof rvb)) ? 0 : -1;
+}
+
+int
+spu_state_load(FILE *f)
+{
+    return (SS_RD(f, spu_regs, sizeof spu_regs)
+            && SS_RD(f, spu_ram, sizeof spu_ram)
+            && SS_RD(f, &spu_endx, sizeof spu_endx)
+            && SS_RD(f, &spu_irq_flag, sizeof spu_irq_flag)
+            && SS_RD(f, voices, sizeof voices)
+            && SS_RD(f, voice_sweep, sizeof voice_sweep)
+            && SS_RD(f, main_sweep, sizeof main_sweep)
+            && SS_RD(f, spu_ring, sizeof spu_ring)
+            && SS_RD(f, &spu_ring_w, sizeof spu_ring_w)
+            && SS_RD(f, &spu_ring_r, sizeof spu_ring_r)
+            && SS_RD(f, cd_fifo, sizeof cd_fifo)
+            && SS_RD(f, &cd_fifo_w, sizeof cd_fifo_w)
+            && SS_RD(f, &cd_fifo_r, sizeof cd_fifo_r)
+            && SS_RD(f, &spu_cycle_acc, sizeof spu_cycle_acc)
+            && SS_RD(f, &spu_noise_val, sizeof spu_noise_val)
+            && SS_RD(f, &spu_noise_count, sizeof spu_noise_count)
+            && SS_RD(f, &rvb, sizeof rvb)) ? 0 : -1;
 }

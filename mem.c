@@ -1,4 +1,5 @@
 #include "cdrom.h"
+#include "savestate.h"
 #include "cpu.h"
 #include "dma.h"
 #include "gpu.h"
@@ -546,3 +547,17 @@ write_hardware_word(uint32_t physical_addr, uint32_t value)
     }
 }
 
+
+int
+mem_state_save(FILE *f)
+{
+    return (SS_WR(f, system_ram, RAM_SIZE)
+            && SS_WR(f, scratchpad, SCRATCH_SIZE)) ? 0 : -1;
+}
+
+int
+mem_state_load(FILE *f)
+{
+    return (SS_RD(f, system_ram, RAM_SIZE)
+            && SS_RD(f, scratchpad, SCRATCH_SIZE)) ? 0 : -1;
+}

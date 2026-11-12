@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "savestate.h"
 #include "dma.h"
 #include "gpu.h"
 #include "mdec.h"
@@ -330,4 +331,22 @@ run_dma_transfer(int channel)
     }
 
     dma_finish(channel);
+}
+
+int
+dma_state_save(FILE *f)
+{
+    return (SS_WR(f, dma_channels, sizeof dma_channels)
+            && SS_WR(f, &dma_control, sizeof dma_control)
+            && SS_WR(f, &dma_interrupt, sizeof dma_interrupt)
+            && SS_WR(f, &dma_irq_delay, sizeof dma_irq_delay)) ? 0 : -1;
+}
+
+int
+dma_state_load(FILE *f)
+{
+    return (SS_RD(f, dma_channels, sizeof dma_channels)
+            && SS_RD(f, &dma_control, sizeof dma_control)
+            && SS_RD(f, &dma_interrupt, sizeof dma_interrupt)
+            && SS_RD(f, &dma_irq_delay, sizeof dma_irq_delay)) ? 0 : -1;
 }

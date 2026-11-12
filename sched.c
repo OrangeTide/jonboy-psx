@@ -8,6 +8,7 @@
 #include "mdec.h"
 #include "pad.h"
 #include "script.h"
+#include "savestate.h"
 
 #include <stdint.h>
 
@@ -166,4 +167,24 @@ uint32_t
 psx_frame_count(void)
 {
     return frame_count;
+}
+
+int
+sched_state_save(FILE *f)
+{
+    return (SS_WR(f, &vblank_acc, sizeof vblank_acc)
+            && SS_WR(f, &frame_count, sizeof frame_count)
+            && SS_WR(f, &hw_cycle, sizeof hw_cycle)
+            && SS_WR(f, &hw_synced, sizeof hw_synced)
+            && SS_WR(f, &hw_deadline, sizeof hw_deadline)) ? 0 : -1;
+}
+
+int
+sched_state_load(FILE *f)
+{
+    return (SS_RD(f, &vblank_acc, sizeof vblank_acc)
+            && SS_RD(f, &frame_count, sizeof frame_count)
+            && SS_RD(f, &hw_cycle, sizeof hw_cycle)
+            && SS_RD(f, &hw_synced, sizeof hw_synced)
+            && SS_RD(f, &hw_deadline, sizeof hw_deadline)) ? 0 : -1;
 }

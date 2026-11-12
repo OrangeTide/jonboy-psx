@@ -323,8 +323,12 @@ behind a magic + version header keyed by title:
 - pad/mc state, and the scheduler's counters and pending events
 
 Restoring is a reverse load into the same globals, with the GPU worker drained and
-the core paused (which the overlay already guarantees). Determinism is not required
-across a save/load, only correctness of the resumed state.
+the core paused (which the overlay already guarantees). The menu only needs the
+resumed state to be correct, but the implementation is verified against the stronger
+property of determinism: a reloaded state must reproduce the next run bit-for-bit.
+That test (below) is what proves no live state was left out, and it found two gaps a
+visual check would have missed (the XA-ADPCM predictor history in `xa.c` and the
+SIO/controller state in `pad.c`), both now serialized.
 
 ## Phasing
 
@@ -356,7 +360,19 @@ A sensible build order, each shippable:
    Recent now survives restarts too. Gamepad remapping is out of scope here (SDL's
    gamepad mapping drives the pad); the dialog rebinds the keyboard.
 4. Save-state serialization and the State menu. The largest piece, deferred last so
-   the rest ships without it.
+   the rest ships without it. Done. A `savestate.c` orchestrator writes a magic +
+   version header then each subsystem's state in a fixed order (CPU, GTE, GPU, VRAM,
+   RAM/scratchpad, DMA, SPU, CD-ROM, XA, pad, MDEC, timers, scheduler); the disc
+   image, memory-card files, and host worker threads are excluded as external media.
+   Each subsystem defines its own `_state_save`/`_state_load` next to its state. The
+   State menu adds Save State... and Load State... as nine-slot grids, keyed per
+   title by a djb2 hash of the mounted disc path (states/<hash>/slot<N>.sav under the
+   config dir), so slots are per game. Save drains the GPU worker and snapshots while
+   the emu thread is parked; load validates the header before touching any state, so
+   a bad file leaves the machine running. Verified by a deterministic round-trip
+   self-test (`make savestate-test`, or `--savestate-selftest`); the menu also
+   reopens on the first menu each time (a small `overlay_open` fix) for predictable
+   navigation.
 
 ## Harness implementation
 

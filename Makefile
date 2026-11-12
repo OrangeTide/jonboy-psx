@@ -44,6 +44,15 @@ conformance : $(BINDIR)/jonboy
 	    if [ "$$v" = PASS ]; then pass=$$((pass+1)); else fail=$$((fail+1)); fi; \
 	done; \
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
+# Save-state determinism regression. It boots the BIOS headless, saves state,
+# then proves a reload reproduces the next run bit-for-bit (see run_savestate_selftest
+# in main.c). Needs a retail BIOS, which is external, so pass it in; a disc and a
+# deeper step budget exercise more subsystems (FMV: SPU, XA, MDEC, CD):
+#   make savestate-test BIOS=path/to/bios.bin [CD=game.cue] [STEPS=300000000]
+STEPS ?= 20000000
+savestate-test : $(BINDIR)/jonboy
+	@test -n "$(BIOS)" || { echo "set BIOS=path/to/bios.bin"; exit 1; }
+	./$(BINDIR)/jonboy --savestate-selftest --steps $(STEPS) --bios "$(BIOS)" $(if $(CD),--cd "$(CD)")
 # Run the PeterLemon GTE (coprocessor 2) tests, the same verdict scheme as the
 # CPU conformance suite. The ROMs live under REF/ and are not part of the repo.
 GTETESTS=$(sort $(wildcard REF/PSX/CPUTest/GTE/*/*.exe REF/PSX/CPUTest/GTE/*/*/*.exe))
@@ -57,9 +66,9 @@ gte-conformance : $(BINDIR)/jonboy
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance gte-conformance amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test gpu-thread-test gpu-readback-test mdec-oracle
+.PHONY: all clean clean-all run fmt conformance gte-conformance savestate-test amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test gpu-thread-test gpu-readback-test mdec-oracle
 ## jonboy
-EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c gte.c inject.c main.c mc.c mdec.c mem.c pad.c psio.c rom.c sched.c script.c spu.c timer.c vram.c xa.c
+EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c gte.c inject.c main.c mc.c mdec.c mem.c pad.c psio.c rom.c sched.c savestate.c script.c spu.c timer.c vram.c xa.c
 all :: $(BINDIR)/jonboy
 clean ::
 	$(RM) $(BINDIR)/jonboy
