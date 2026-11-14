@@ -313,7 +313,7 @@ typedef struct {
     SDL_AtomicInt overlay;
 
     // View and audio settings the menu changes (main-thread owned, persisted).
-    int aspect_mode;   // 0 = 4:3 letterbox, 1 = stretch, 2 = integer scale
+    int filter_idx;    // 0 = linear, 1 = nearest (texture scale filter)
     int scale_idx;     // index into the window-size presets
     int fullscreen;    // 0/1
     int volume;        // master volume, 0..100
@@ -869,7 +869,7 @@ static const struct { int w, h; const char *name; } ov_scales[] = {
 };
 #define OV_SCALE_COUNT ((int)(sizeof ov_scales / sizeof ov_scales[0]))
 
-static const char *const ov_aspect_names[] = { "4:3", "Stretch", "Integer" };
+static const char *const ov_filter_names[] = { "Linear", "Nearest" };
 
 // The menu bar: top menus and their items. Kept as flat tables so navigation and
 // drawing are trivial. The View/Settings labels are built dynamically (ov_item_label).
@@ -888,7 +888,7 @@ static const char *const ov_card_items[] = {
     "Insert Card 1...", "Eject Card 1", "Insert Card 2...", "Eject Card 2"
 };
 static const char *const ov_view_items[] = {
-    "Fullscreen", "VRAM View", "Aspect", "Scale", "Perf HUD"
+    "Fullscreen", "VRAM View", "Filter", "Scale", "Perf HUD"
 };
 static const char *const ov_settings_items[] = {
     "Controls...", "Volume"
@@ -917,7 +917,7 @@ ov_item_label(AppContext *app, int menu, int i, char *buf, size_t n)
         switch (i) {
         case 0: SDL_snprintf(buf, n, "Fullscreen   %s", app->fullscreen ? "on" : "off"); return;
         case 1: SDL_snprintf(buf, n, "VRAM View    %s", app->full_vram_view ? "on" : "off"); return;
-        case 2: SDL_snprintf(buf, n, "Aspect       %s", ov_aspect_names[app->aspect_mode]); return;
+        case 2: SDL_snprintf(buf, n, "Filter       %s", ov_filter_names[app->filter_idx]); return;
         case 3: SDL_snprintf(buf, n, "Scale        %s", ov_scales[app->scale_idx].name); return;
         case 4: SDL_snprintf(buf, n, "Perf HUD     %s", SDL_GetAtomicInt(&g_perf_hud) ? "on" : "off"); return;
         }
@@ -1171,15 +1171,17 @@ ov_recent_choose(AppContext *app)
 // ---- View settings ----
 
 static void
-ov_apply_aspect(AppContext *app)
+ov_apply_filter(AppContext *app)
 {
-    SDL_RendererLogicalPresentation mode =
-        app->aspect_mode == 1 ? SDL_LOGICAL_PRESENTATION_STRETCH
-      : app->aspect_mode == 2 ? SDL_LOGICAL_PRESENTATION_INTEGER_SCALE
-      : SDL_LOGICAL_PRESENTATION_LETTERBOX;
-    SDL_SetRenderLogicalPresentation(app->renderer, 640, 480, mode);
-    SDL_snprintf(ov.status, sizeof ov.status, "aspect: %s",
-                 ov_aspect_names[app->aspect_mode]);
+    // The scaling filter is a real user choice; the display aspect is not. Nearest
+    // keeps hard pixel edges, linear smooths them. Both display textures scale the
+    // same way so the 15-bit and 24-bit paths match.
+    SDL_ScaleMode m = app->filter_idx == 1 ? SDL_SCALEMODE_NEAREST
+                                           : SDL_SCALEMODE_LINEAR;
+    SDL_SetTextureScaleMode(app->vram_texture, m);
+    SDL_SetTextureScaleMode(app->disp24_texture, m);
+    SDL_snprintf(ov.status, sizeof ov.status, "filter: %s",
+                 ov_filter_names[app->filter_idx]);
 }
 
 static void
@@ -1257,7 +1259,7 @@ ov_config_save(AppContext *app)
     if (!f) {
         return;
     }
-    fprintf(f, "aspect=%d\n", app->aspect_mode);
+    fprintf(f, "filter=%d\n", app->filter_idx);
     fprintf(f, "scale=%d\n", app->scale_idx);
     fprintf(f, "fullscreen=%d\n", app->fullscreen);
     fprintf(f, "perf_hud=%d\n", SDL_GetAtomicInt(&g_perf_hud));
@@ -1295,8 +1297,8 @@ ov_config_load(AppContext *app)
         *eq = '\0';
         const char *key = line, *val = eq + 1;
 
-        if (strcmp(key, "aspect") == 0) {
-            app->aspect_mode = ((atoi(val) % 3) + 3) % 3;
+        if (strcmp(key, "filter") == 0) {
+            app->filter_idx = atoi(val) ? 1 : 0;
         } else if (strcmp(key, "scale") == 0) {
             int s = atoi(val);
             if (s >= 0 && s < OV_SCALE_COUNT) app->scale_idx = s;
@@ -1412,7 +1414,7 @@ ov_activate(AppContext *app)
         switch (ov.item) {
         case 0: ov_toggle_fullscreen(app); return 0;
         case 1: ov_toggle_vram_view(app); return 0;
-        case 2: app->aspect_mode = (app->aspect_mode + 1) % 3; ov_apply_aspect(app); return 0;
+        case 2: app->filter_idx ^= 1; ov_apply_filter(app); return 0;
         case 3: app->scale_idx = (app->scale_idx + 1) % OV_SCALE_COUNT; ov_apply_scale(app); return 0;
         case 4: ov_toggle_perf_hud(); return 0;
         }
@@ -1812,12 +1814,15 @@ jonboy_runapp(int argc, char *argv[])
         return 1;
     }
 
-    // Present into a 4:3 logical area: the picture always keeps the 4:3 aspect, and
-    // a window with a different aspect is pillarboxed or letterboxed with the clear
-    // color rather than stretching the image. Everything below draws to the whole
-    // logical area (a NULL destination), so SDL applies the scaling and bars. The
-    // mode, window size, and fullscreen come from the loaded config.
-    ov_apply_aspect(&app);
+    // The PSX picture is always the 4:3 FULL format on a TV regardless of its
+    // internal horizontal resolution, so present into a fixed 640x480 (FULL) logical
+    // area. The SDL "letterbox" presentation is only the fit strategy: it adds bars
+    // when the output is not 4:3. Windowed, the window is locked to 4:3 below so no
+    // bars ever show; fullscreen pillar/letterboxes the FULL picture inside the
+    // native display. Everything below draws to the whole logical area (NULL dest).
+    SDL_SetRenderLogicalPresentation(app.renderer, 640, 480,
+                                     SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    SDL_SetWindowAspectRatio(app.window, 4.0f / 3.0f, 4.0f / 3.0f);
     if (app.fullscreen) {
         SDL_SetWindowFullscreen(app.window, true);
     } else {
@@ -1868,6 +1873,9 @@ jonboy_runapp(int argc, char *argv[])
         SDL_Quit();
         return 1;
     }
+
+    // Both display textures exist now, so realize the saved scaling filter.
+    ov_apply_filter(&app);
 
     // Open the audio output stream for SPU/CD sound. A failure here is not
     // fatal: the emulator runs silently.
