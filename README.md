@@ -72,8 +72,8 @@ download quarantine once to run it:
 xattr -dr com.apple.quarantine /path/to/JonBoy.app
 ```
 
-CI builds this bundle for Apple Silicon and Intel on every run and uploads each
-as an artifact.
+CI builds this bundle for Apple Silicon on every run and uploads it as an
+artifact.
 
 ### Installing
 
