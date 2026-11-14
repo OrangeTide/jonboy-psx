@@ -9,6 +9,17 @@ as work lands, before the next bump moves them into a version.
 
 ## November 2026
 
+### 0.2.1 (2026-11-13)
+
+Fixed:
+
+- An SPU host-test buffer overflow that crashed under clang (and so on macOS):
+  the output buffer was sized in samples but filled in stereo frames.
+- Left-shift-of-negative undefined behavior in the GPU triangle rasterizer and
+  the MDEC dequant. The emulator's output is unchanged.
+- Continuous integration now builds on the current macOS and Ubuntu runners and
+  keeps the Raspberry Pi Cortex-A53 tuning off Apple Silicon.
+
 ### 0.2.0 (2026-11-13)
 
 First tagged release. JonBoy boots the retail BIOS and runs games from a disc
