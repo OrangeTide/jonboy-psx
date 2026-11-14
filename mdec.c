@@ -181,8 +181,8 @@ mdec_decode_block(int16_t *block, const uint8_t *quant, uint32_t *pos, uint32_t 
     q_scale = (word >> 10) & 0x3Fu;
     ci = sign_extend_10(word & 0x03FFu);
     q = (int)quant[0];
-    tmp = (q != 0) ? (((ci * q) << 4) + (ci ? (ci < 0 ? 8 : -8) : 0))
-          : ((ci * 2) << 4);
+    tmp = (q != 0) ? ((ci * q * 16) + (ci ? (ci < 0 ? 8 : -8) : 0))
+          : (ci * 2 * 16);
     block[zigzag_to_linear[0]] = (int16_t)clamp_int(tmp, -0x4000, 0x3FFF);
 
     k = 0;
@@ -198,8 +198,8 @@ mdec_decode_block(int16_t *block, const uint8_t *quant, uint32_t *pos, uint32_t 
 
         ci = sign_extend_10(word & 0x03FFu);
         q = (int)q_scale * (int)quant[k];
-        tmp = (q != 0) ? ((((ci * q) >> 3) << 4) + (ci ? (ci < 0 ? 8 : -8) : 0))
-              : ((ci * 2) << 4);
+        tmp = (q != 0) ? ((((ci * q) >> 3) * 16) + (ci ? (ci < 0 ? 8 : -8) : 0))
+              : (ci * 2 * 16);
         block[zigzag_to_linear[k]] = (int16_t)clamp_int(tmp, -0x4000, 0x3FFF);
     }
 

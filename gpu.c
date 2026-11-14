@@ -565,9 +565,11 @@ static void
 draw_triangle(RVertex v0, RVertex v1, RVertex v2,
               int gouraud, const PrimState *ps)
 {
-    int x0 = v0.x << 4, y0 = v0.y << 4;
-    int x1 = v1.x << 4, y1 = v1.y << 4;
-    int x2 = v2.x << 4, y2 = v2.y << 4;
+    // Vertex positions are signed (already offset) and go negative, so scale to
+    // the 1/16 subpixel grid with a multiply; left-shifting a negative is UB.
+    int x0 = v0.x * 16, y0 = v0.y * 16;
+    int x1 = v1.x * 16, y1 = v1.y * 16;
+    int x2 = v2.x * 16, y2 = v2.y * 16;
 
     int area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
 
@@ -609,8 +611,8 @@ draw_triangle(RVertex v0, RVertex v1, RVertex v2,
     int a12 = y1 - y2, b12 = x2 - x1;
     int a20 = y2 - y0, b20 = x0 - x2;
 
-    int px0 = (minx << 4) + 8; // sample at pixel centers
-    int py0 = (miny << 4) + 8;
+    int px0 = (minx * 16) + 8; // sample at pixel centers
+    int py0 = (miny * 16) + 8;
 
     int w0_row = a12 * (px0 - x1) + b12 * (py0 - y1);
     int w1_row = a20 * (px0 - x2) + b20 * (py0 - y2);
@@ -621,9 +623,11 @@ draw_triangle(RVertex v0, RVertex v1, RVertex v2,
     int bias1 = (a20 > 0 || (a20 == 0 && b20 > 0)) ? 0 : -1;
     int bias2 = (a01 > 0 || (a01 == 0 && b01 > 0)) ? 0 : -1;
 
-    int a12_step = a12 << 4, b12_step = b12 << 4;
-    int a20_step = a20 << 4, b20_step = b20 << 4;
-    int a01_step = a01 << 4, b01_step = b01 << 4;
+    // The edge coefficients can be negative, so scale by 16 with a multiply;
+    // left-shifting a negative value is undefined behavior.
+    int a12_step = a12 * 16, b12_step = b12 * 16;
+    int a20_step = a20 * 16, b20_step = b20 * 16;
+    int a01_step = a01 * 16, b01_step = b01 * 16;
 
     // Every interpolated attribute A is affine across the triangle, so instead
     // of three float products per pixel (A0*b0 + A1*b1 + A2*b2) it is stepped by

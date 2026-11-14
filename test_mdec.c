@@ -259,8 +259,8 @@ ref_dequant(int16_t *coeff, const uint16_t *rle, int n, const uint8_t *quant)
             if (ci < 64) {
                 int c = ref_s10(word & 0x3FFu);
                 int q = qscale * quant[ci];
-                int t = q ? ((((c * q) >> 3) << 4) + (c ? (c < 0 ? 8 : -8) : 0))
-                          : ((c * 2) << 4);
+                int t = q ? ((((c * q) >> 3) * 16) + (c ? (c < 0 ? 8 : -8) : 0))
+                          : (c * 2 * 16);
                 coeff[ref_zig[ci]] = (int16_t)ref_clamp(t, -0x4000, 0x3FFF);
                 ci++;
             }
