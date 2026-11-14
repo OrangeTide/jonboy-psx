@@ -43,7 +43,7 @@ static void tick_samples(int n) { psx_spu_tick((uint32_t)n * 768); }
 int
 main(void)
 {
-    int16_t out[4096];
+    int16_t out[4096 * 2];   // 2 int16 per stereo frame; pulls request up to 4096 frames
 
     // ---- CD audio path: enabled, full volume, mixed to the output. ----
     psx_spu_reset();

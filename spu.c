@@ -95,7 +95,7 @@ build_env_tables(void)
         if (r < 48) {
             env_denom[r] = 1;
             env_num_inc[r] = (7 - (r & 3)) << (11 - (r >> 2));
-            env_num_dec[r] = (-8 + (r & 3)) << (11 - (r >> 2));
+            env_num_dec[r] = -((8 - (r & 3)) << (11 - (r >> 2)));
         } else {
             env_denom[r] = 1 << ((r >> 2) - 11);
             env_num_inc[r] = 7 - (r & 3);
