@@ -1805,7 +1805,7 @@ jonboy_runapp(int argc, char *argv[])
     // 2. Create an SDL3 window and hardware-accelerated renderer. The PSX display
     // is 4:3 on a TV whatever its internal pixel resolution, so the window opens
     // at a 4:3 size and is resizable.
-    if (!SDL_CreateWindowAndRenderer("JonBoy Toy Console (R3051)", 960, 720,
+    if (!SDL_CreateWindowAndRenderer("JonBoy PSX Emulator", 960, 720,
                                      SDL_WINDOW_RESIZABLE, &app.window, &app.renderer)) {
         SDL_Log("Window/Renderer Creation Failed: %s", SDL_GetError());
         SDL_Quit();
