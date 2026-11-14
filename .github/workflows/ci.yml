@@ -109,9 +109,24 @@ jobs:
                script-test mdec-test gte-test gpu-thread-test gpu-readback-test
 
       - name: Package app bundle
+        run: make macos-app
+
+      - name: Smoke-test app bundle
         run: |
-          make macos-app
-          ditto -c -k --keepParent _out/JonBoy.app "_out/JonBoy-macos-${{ matrix.arch }}.zip"
+          bin=_out/JonBoy.app/Contents/MacOS/jonboy
+          otool -L "$bin"
+          # The SDL3 dependency must point into the bundle, not at Homebrew.
+          sdl=$(otool -L "$bin" | awk '/libSDL3/ {print $1; exit}')
+          case "$sdl" in
+            @executable_path/../Frameworks/libSDL3*) ;;
+            *) echo "SDL3 not repointed into the bundle: $sdl"; exit 1 ;;
+          esac
+          # dyld loads the bundled SDL3 before main() runs, so a --help that
+          # exits 0 proves the repoint resolves, with no display needed.
+          "$bin" --help
+
+      - name: Archive app bundle
+        run: ditto -c -k --keepParent _out/JonBoy.app "_out/JonBoy-macos-${{ matrix.arch }}.zip"
 
       - name: Upload app bundle
         uses: actions/upload-artifact@v6
