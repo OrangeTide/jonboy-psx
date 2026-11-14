@@ -1,16 +1,20 @@
 BINDIR=_out
-# Optimization level is chosen per target architecture. On ARM (Raspberry Pi and
-# other Cortex targets) build optimized and tuned for the in-order Cortex-A53
-# pipeline. Everywhere else (x86-64 dev machines) build -O2: the interpreter and
-# per-instruction hardware ticks are the bottleneck, and -Og runs the core about
-# 1.4x slower, which is enough to starve real-time audio. Pass OPT= to override,
-# for example OPT=-Og for a debug build. The target is read from the compiler's
-# own triple ($(CC) -dumpmachine), so this stays correct under a cross-compiler.
+# Optimization level is chosen per target architecture. On a Linux ARM board
+# (Raspberry Pi and other Cortex targets) build tuned for the in-order Cortex-A53
+# pipeline. Everywhere else (x86-64 dev machines, and Apple Silicon, which is not
+# a Cortex core) build plain -O2: the interpreter and per-instruction hardware
+# ticks are the bottleneck, and -Og runs the core about 1.4x slower, which is
+# enough to starve real-time audio. Pass OPT= to override, for example OPT=-Og
+# for a debug build. The target is read from the compiler's own triple
+# ($(CC) -dumpmachine), so this stays correct under a cross-compiler. The -linux
+# guard keeps the Cortex tuning off macOS arm64, whose triple also starts "arm".
 TARGET:=$(shell $(CC) -dumpmachine)
-ifneq (,$(filter aarch64% arm%,$(TARGET)))
-OPT?=-O2 -mcpu=cortex-a53 -fomit-frame-pointer
-else
+IS_ARM:=$(filter aarch64% arm%,$(TARGET))
+IS_LINUX:=$(findstring linux,$(TARGET))
+ifeq ($(and $(IS_ARM),$(IS_LINUX)),)
 OPT?=-O2
+else
+OPT?=-O2 -mcpu=cortex-a53 -fomit-frame-pointer
 endif
 CFLAGS=-Wall -W -g $(OPT)
 # Cross-toolchain for the MIPS test carts and the loader PS-EXE. Different distros
