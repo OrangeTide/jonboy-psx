@@ -41,7 +41,7 @@ jobs:
             libasound2-dev libpulse-dev libudev-dev \
             libx11-dev libxext-dev libxcursor-dev libxrandr-dev libxi-dev \
             libwayland-dev wayland-protocols libxkbcommon-dev \
-            libgl1-mesa-dev libegl1-mesa-dev
+            libgl-dev libegl-dev
 
       - name: Cache SDL3
         id: sdl3-cache
@@ -88,7 +88,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14   # Apple Silicon
+          - os: macos-15   # Apple Silicon
             arch: arm64
           - os: macos-13   # Intel
             arch: x86_64
