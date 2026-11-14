@@ -66,7 +66,7 @@ gte-conformance : $(BINDIR)/jonboy
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance gte-conformance savestate-test amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test gpu-thread-test gpu-readback-test mdec-oracle macos-app install install-man uninstall
+.PHONY: all clean clean-all run fmt conformance gte-conformance savestate-test amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test gpu-thread-test gpu-readback-test mdec-oracle macos-app install install-man uninstall release-check
 ## jonboy
 EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c gte.c inject.c main.c mc.c mdec.c mem.c pad.c psio.c rom.c sched.c savestate.c script.c spu.c timer.c vram.c xa.c
 all :: $(BINDIR)/jonboy
@@ -180,8 +180,31 @@ $(BINDIR)/loader.elf : $(LOADER_SRC) loader/loader.ld | $(BINDIR)
 $(BINDIR)/loader.exe : $(BINDIR)/loader.elf $(BINDIR)/mkexe
 	$(MIPSEL_ARCH)-objcopy -O binary $< $(BINDIR)/loader.bin
 	$(BINDIR)/mkexe $(BINDIR)/loader.bin $@
-## version (git describe; falls back to a bare sha, then "dev")
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+## version: version.mk holds the authoritative number; git describe refines it.
+# On a release tree describe returns the tag (clean) or the tag plus a commit
+# count and sha; a tagless checkout falls back to a -dev- sha suffix, and no git
+# at all leaves a bare version. Matching v$(PROJ_VERSION) (not v*) keeps a
+# vendored copy from describing itself against a host project's tags.
+include version.mk
+GIT_DESC := $(shell git describe --tags --dirty --match 'v$(PROJ_VERSION)' 2>/dev/null)
+ifeq ($(GIT_DESC),)
+GIT_SHA := $(shell git rev-parse --short HEAD 2>/dev/null)
+GIT_DIRTY := $(shell test -n "$$(git status --porcelain --untracked-files=no 2>/dev/null)" && echo -dirty)
+GIT_SUFFIX := $(if $(GIT_SHA),-dev-g$(GIT_SHA)$(GIT_DIRTY),)
+else
+GIT_SUFFIX := $(patsubst v$(PROJ_VERSION)%,%,$(GIT_DESC))
+endif
+VERSION := $(PROJ_VERSION)$(GIT_SUFFIX)
+# Verify version.mk and the git tag agree before cutting a release.
+release-check :
+	@v=$(PROJ_VERSION); \
+	if ! git rev-parse --verify --quiet "refs/tags/v$$v" >/dev/null; then \
+	    echo "release-check: no tag v$$v (version.mk says $$v)" >&2; exit 1; fi; \
+	if [ "$$(git rev-parse "v$$v^{commit}")" != "$$(git rev-parse HEAD)" ]; then \
+	    echo "release-check: tag v$$v is not at HEAD" >&2; exit 1; fi; \
+	if [ -n "$$(git status --porcelain)" ]; then \
+	    echo "release-check: working tree is dirty" >&2; exit 1; fi; \
+	echo "release-check: v$$v ok"
 ## install (PREFIX defaults to the XDG user prefix; pass PREFIX=/usr/local for a
 ## system install, and DESTDIR= to stage into a packaging root)
 PREFIX ?= $(HOME)/.local
