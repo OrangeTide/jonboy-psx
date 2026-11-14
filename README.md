@@ -1,5 +1,7 @@
 # JonBoy
 
+[![CI](https://github.com/OrangeTide/jonboy-psx/actions/workflows/ci.yml/badge.svg)](https://github.com/OrangeTide/jonboy-psx/actions/workflows/ci.yml)
+
 A PlayStation 1 (R3000A) emulator in C, rendered with SDL3. It boots the retail
 BIOS and runs games from a disc image, with software GPU rasterization, SPU audio,
 a DualShock controller, and memory cards. It also has an invented PSIO-style
@@ -20,6 +22,12 @@ Chrono Trigger:
 | Overworld | Bedroom |
 |-----------|---------|
 | ![Chrono Trigger overworld](assets/ct_overworld.png) | ![Chrono Trigger bedroom](assets/ct_bedroom.png) |
+
+Its intro, decoded through the MDEC full-motion-video path:
+
+| Opening | Title | Closing |
+|---------|-------|---------|
+| ![Frog](assets/ct_fmv_frog.png) | ![Chrono Trigger title](assets/ct_fmv_title.png) | ![Earth](assets/ct_fmv_earth.png) |
 
 Working so far:
 
@@ -53,6 +61,32 @@ The self-test carts are assembled from MIPS assembly, so building them needs a
 `mipsel-unknown-elf` binutils toolchain (`as`, `ld`, `objcopy`). If that
 toolchain is absent, `make _out/jonboy` still builds the emulator on its own.
 
+### macOS app bundle
+
+On macOS, `make macos-app` packages `_out/JonBoy.app`, a self-contained bundle
+with the SDL3 library copied in, so it runs on a Mac without Homebrew. The build
+is not code-signed, so the first launch is blocked by Gatekeeper. Clear the
+download quarantine once to run it:
+
+```
+xattr -dr com.apple.quarantine /path/to/JonBoy.app
+```
+
+CI builds this bundle for Apple Silicon and Intel on every run and uploads each
+as an artifact.
+
+### Installing
+
+`make install` copies the emulator and its man page under `PREFIX`, which
+defaults to `$HOME/.local` (the XDG user prefix, no root needed):
+
+```
+make install                 # into ~/.local
+make install PREFIX=/usr/local   # system-wide
+```
+
+`DESTDIR` stages into a packaging root, and `make uninstall` removes both files.
+
 ## Running
 
 ```
@@ -84,10 +118,13 @@ image on a slow or network filesystem is read ahead on a background thread rathe
 than freezing the display. GPU rasterization also runs on its own worker thread, so
 the drawing work for heavy scenes happens in parallel with the rest of the core
 rather than competing with it for the real-time frame budget; set
-`JONBOY_GPU_THREAD=0` to fall back to inline rasterization. The picture is presented
-at a 4:3 aspect ratio, pillarboxed or letterboxed when the window is resized away
-from 4:3. A disc swapped at runtime (see Scripted input) raises the drive-cover
-interrupt, so a running game notices the change.
+`JONBOY_GPU_THREAD=0` to fall back to inline rasterization. The picture is always
+presented at the 4:3 format the console sends to a TV, independent of the game's
+internal horizontal resolution. The window is locked to 4:3 so a resize keeps the
+picture correct with no bars; fullscreen pillarboxes or letterboxes the 4:3 picture
+inside the native display. The scaling filter (linear or nearest) is a separate
+choice in the menu's View submenu. A disc swapped at runtime (see Scripted input)
+raises the drive-cover interrupt, so a running game notices the change.
 
 The headless, `--boot`, `--exe`, and `--gdb` modes keep a single-threaded,
 deterministic core (no worker threads), so reference traces and conformance stay
