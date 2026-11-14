@@ -66,7 +66,7 @@ gte-conformance : $(BINDIR)/jonboy
 	echo "-----------------"; echo "PASS=$$pass FAIL=$$fail"
 $(BINDIR) :
 	mkdir -p $@
-.PHONY: all clean clean-all run fmt conformance gte-conformance savestate-test amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test gpu-thread-test gpu-readback-test mdec-oracle
+.PHONY: all clean clean-all run fmt conformance gte-conformance savestate-test amalg cdda-test spu-test xa-test mc-test loader-test pad-test script-test mdec-test gte-test gpu-thread-test gpu-readback-test mdec-oracle macos-app install install-man uninstall
 ## jonboy
 EMU_SRC=cdrom.c cpu.c dma.c gdb.c gpu.c gte.c inject.c main.c mc.c mdec.c mem.c pad.c psio.c rom.c sched.c savestate.c script.c spu.c timer.c vram.c xa.c
 all :: $(BINDIR)/jonboy
@@ -180,5 +180,43 @@ $(BINDIR)/loader.elf : $(LOADER_SRC) loader/loader.ld | $(BINDIR)
 $(BINDIR)/loader.exe : $(BINDIR)/loader.elf $(BINDIR)/mkexe
 	$(MIPSEL_ARCH)-objcopy -O binary $< $(BINDIR)/loader.bin
 	$(BINDIR)/mkexe $(BINDIR)/loader.bin $@
+## version (git describe; falls back to a bare sha, then "dev")
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+## install (PREFIX defaults to the XDG user prefix; pass PREFIX=/usr/local for a
+## system install, and DESTDIR= to stage into a packaging root)
+PREFIX ?= $(HOME)/.local
+BINDIR_INSTALL ?= $(PREFIX)/bin
+MANDIR ?= $(PREFIX)/share/man/man1
+install : $(BINDIR)/jonboy install-man
+	install -d "$(DESTDIR)$(BINDIR_INSTALL)"
+	install -m 755 $(BINDIR)/jonboy "$(DESTDIR)$(BINDIR_INSTALL)/jonboy"
+install-man : jonboy.1
+	install -d "$(DESTDIR)$(MANDIR)"
+	install -m 644 jonboy.1 "$(DESTDIR)$(MANDIR)/jonboy.1"
+uninstall :
+	$(RM) "$(DESTDIR)$(BINDIR_INSTALL)/jonboy" "$(DESTDIR)$(MANDIR)/jonboy.1"
+## macOS app bundle
+# Package _out/JonBoy.app with the SDL3 dylib copied in and the binary repointed
+# at it, so the bundle runs on a Mac without Homebrew. Native macOS only (uses
+# otool/install_name_tool). The build is unsigned; clear the download quarantine
+# with: xattr -dr com.apple.quarantine _out/JonBoy.app
+macos-app : $(BINDIR)/jonboy packaging/Info.plist.in
+	@command -v install_name_tool >/dev/null 2>&1 || { echo "macos-app: macOS only (needs install_name_tool)"; exit 1; }
+	@app="$(BINDIR)/JonBoy.app"; fw="$$app/Contents/Frameworks"; \
+	rm -rf "$$app"; \
+	mkdir -p "$$app/Contents/MacOS" "$$fw" "$$app/Contents/Resources"; \
+	cp $(BINDIR)/jonboy "$$app/Contents/MacOS/jonboy"; \
+	rec=$$(otool -L $(BINDIR)/jonboy | awk '/libSDL3/ {print $$1; exit}'); \
+	test -n "$$rec" || { echo "macos-app: no SDL3 dependency in binary"; exit 1; }; \
+	base=$$(basename "$$rec"); src="$$rec"; \
+	case "$$rec" in @*) src="$$(pkg-config --variable=libdir sdl3)/$$base";; esac; \
+	test -f "$$src" || src="$$(pkg-config --variable=libdir sdl3)/$$base"; \
+	cp "$$src" "$$fw/$$base"; chmod u+w "$$fw/$$base"; \
+	install_name_tool -id "@executable_path/../Frameworks/$$base" "$$fw/$$base"; \
+	install_name_tool -change "$$rec" "@executable_path/../Frameworks/$$base" "$$app/Contents/MacOS/jonboy"; \
+	sed 's/@VERSION@/$(VERSION)/g' packaging/Info.plist.in > "$$app/Contents/Info.plist"; \
+	echo "built $$app ($(VERSION), bundled $$base)"
+clean ::
+	$(RM) -r $(BINDIR)/JonBoy.app
 ## end
 -include $(wildcard *.d)

@@ -1,0 +1,232 @@
+.TH JONBOY 1 "2026-11-13" "JonBoy" "User Commands"
+.SH NAME
+jonboy \- PlayStation 1 (R3000A) emulator
+.SH SYNOPSIS
+.B jonboy
+.RI [ options ]
+.br
+.B jonboy --headless
+.I file
+.RI [ options ]
+.br
+.B jonboy --exe
+.I file.exe
+.RI [ options ]
+.br
+.B jonboy --boot
+.RI [ options ]
+.br
+.B jonboy --bench
+.RI [ options ]
+.br
+.B jonboy --gdb
+.RI [ port ]
+.br
+.B jonboy --savestate-selftest
+.RI [ options ]
+.SH DESCRIPTION
+.B jonboy
+is a PlayStation 1 emulator written in C and rendered with SDL3. It boots the
+retail BIOS and runs games from a mounted disc image, with a software GPU, SPU
+audio, a DualShock controller, and memory cards. It also supports an invented
+PSIO-style SD-card cartridge and an in-emulation loader menu.
+.PP
+With no mode flag,
+.B jonboy
+opens an SDL window and starts the CPU at the BIOS reset vector
+.RB ( 0xBFC00000 ).
+If no BIOS is given it maps
+.I bios.bin
+from the working directory when present. The picture is always presented at the
+4:3 format the console sends to a TV, independent of the game's internal
+horizontal resolution.
+.SH MODES
+.TP
+.BI --headless " file"
+Load a flat binary into RAM and run it without a window. On stop it prints the
+registers, \fB$s0\fR, and a memory window.
+.TP
+.BI --exe " file.exe"
+Load and run a PlayStation executable (PS-EXE) headless. Used by the conformance
+runner, which reads a PASS or FAIL verdict back from the framebuffer.
+.TP
+.B --boot
+Boot the BIOS headless.
+.TP
+.B --bench
+Run the deterministic core unpaced and report the emulation thread's wall time
+per emulated frame against the 16.67 ms budget.
+.TP
+.BI --gdb " [port]"
+Boot the BIOS headless and wait for a GDB remote connection on a loopback TCP
+socket (default port 1234). The CPU starts halted at the reset vector.
+.TP
+.B --savestate-selftest
+Boot headless, save state, then prove a reload reproduces the next run
+bit-for-bit. \fB--steps\fR sets the warmup depth.
+.TP
+.BI --sideload " file.exe"
+Boot the BIOS, then swap in a PS-EXE once the kernel reaches the shell entry.
+Implies \fB--boot\fR.
+.SH BOOT OPTIONS
+These apply to the windowed emulator and to
+.BR --boot .
+.TP
+.BI --bios " file"
+BIOS image to load (default
+.IR bios.bin ).
+.TP
+.BI --cd " file"
+Mount a disc image: a
+.IR .bin ,
+.IR .cue
+(including multi-track), or
+.IR .iso .
+.TP
+.BI --memcard " file"
+Slot 1 memory card image, a raw 128 KB file created and formatted if absent.
+.TP
+.BI --memcard2 " file"
+Slot 2 memory card image, same format as
+.BR --memcard .
+.TP
+.BI --games " dir"
+Directory the loader menu browses. In the windowed build this auto-loads the
+menu, navigated with the pad.
+.TP
+.BI --script " file"
+Run a timed system-event script that drives the pad, analog mode, and disc
+insert or eject, keyed by the video frame counter.
+.TP
+.B --psio
+Inject the PSIO boot stub over the BIOS entry.
+.TP
+.BI --sd " file"
+Mount a virtual SD-card image for the PSIO cartridge.
+.TP
+.BI --firmware " file"
+Load a PSIO firmware ROM image.
+.SH BENCHMARK OPTIONS
+Used with
+.BR --bench .
+.TP
+.BI --bench-warmup " n"
+Frames to run before measuring (default 300).
+.TP
+.BI --bench-frames " n"
+Frames to measure (default 600, about 10 s of console time).
+.SH HEADLESS AND CAPTURE OPTIONS
+.TP
+.BI --load-addr " hex"
+Physical load address for
+.B --headless
+(default 0).
+.TP
+.BI --pc " hex"
+Entry PC (default is the load address).
+.TP
+.BI --steps " n"
+Maximum instructions to run.
+.TP
+.BI --vram-out " file"
+Write the visible 320x240 framebuffer region as a PPM image at the end of a run.
+.TP
+.BI --frames-out " dir"
+Write a numbered framebuffer PPM into
+.I dir
+periodically during a boot run, producing a filmstrip.
+.TP
+.BI --frames-every " n"
+Dump one frame every
+.I n
+video frames (default 30).
+.TP
+.BI --frames-from " n"
+First video frame to start dumping at (default 0).
+.SH CONTROLS
+In the windowed build the keyboard drives the pad: the arrow keys are the D-pad;
+.BR Z ", " X ", " A ", " S
+are Cross, Circle, Square, Triangle;
+.B Enter
+and
+.B Right Shift
+are Start and Select;
+.BR Q ", " W ", " E ", " R
+are L1, R1, L2, R2;
+.B C
+and
+.B V
+are L3 and R3; and
+.B Tab
+toggles the DualShock analog mode. A connected SDL gamepad drives the buttons and
+both analog sticks.
+.B Escape
+opens the menu overlay, and
+.B F1
+toggles between the display area and the full 1024x512 VRAM view.
+.SH ENVIRONMENT
+.TP
+.B JONBOY_GPU_THREAD
+Set to
+.B 0
+to disable the GPU rasterization worker thread and fall back to inline
+rasterization.
+.TP
+.B JONBOY_PERF
+Set to
+.B 1
+to force the performance HUD on at startup.
+.TP
+.B JONBOY_AUDIO_CUSHION_MS
+Override the audio run-ahead cushion in milliseconds.
+.B 0
+disables the run-ahead and leaves pure real-time pacing.
+.TP
+.B JONBOY_FASTTICK
+Override the per-step hardware tick batching. The real-time windowed build
+enables it; the deterministic modes leave it off for exact per-instruction
+behavior.
+.TP
+.B XDG_CONFIG_HOME
+Base directory for the configuration file. See FILES.
+.SH FILES
+.TP
+.I bios.bin
+BIOS image mapped from the working directory when no
+.B --bios
+is given.
+.TP
+.I $XDG_CONFIG_HOME/jonboy/jonboy.ini
+Persisted window, view, audio, and controller settings. Falls back to
+.I ~/.config/jonboy/jonboy.ini
+when
+.B XDG_CONFIG_HOME
+is unset.
+.SH EXAMPLES
+Boot a game through a retail BIOS from a mounted disc:
+.PP
+.RS
+.nf
+jonboy --bios scph5501.bin --cd Game.cue
+.fi
+.RE
+.PP
+Run a PS-EXE conformance test and save its framebuffer:
+.PP
+.RS
+.nf
+jonboy --exe CPUADD.exe --vram-out add.ppm
+.fi
+.RE
+.PP
+Browse a games directory from the on-screen loader menu:
+.PP
+.RS
+.nf
+jonboy --games /path/to/games --bios scph5501.bin
+.fi
+.RE
+.SH SEE ALSO
+The project README and
+.I TODO.md
+document the subsystems, test suites, and current status in detail.
